@@ -113,10 +113,15 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       fetcherVersion = 3;
       hash = resolvedHash;
       # Capture pnpm's registry metadata cache next to the store: the legacy
-      # `pnpm deploy` below re-resolves the workspace without reading a lockfile
-      # and therefore needs package metadata, which the pure build cannot fetch.
+      # `pnpm deploy` below re-resolves the workspace and therefore needs
+      # package metadata, which the pure build cannot fetch.
       prePnpmInstall = ''
         pnpm config set cache-dir "$storePath/pnpm-cache"
+        # The frozen install that follows only downloads tarballs, so warm the
+        # metadata cache with one resolve-only pass over the whole lockfile.
+        # `--lockfile-only` leaves pnpm-lock.yaml byte-identical, so the install
+        # still materialises exactly the closure this hash covers.
+        pnpm install --lockfile-only --force --ignore-scripts --config.minimumReleaseAge=0
       '';
     };
 
