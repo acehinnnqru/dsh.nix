@@ -13,10 +13,9 @@
  *      source instead of inside the target.
  *   2. Complete the closure: restore dependencies and required peer
  *      dependencies of staged packages that the deploy manifest omits.
- *   3. Replace every remaining symlink below `<staging>/node_modules` with the
- *      files it points at, dropping `.bin` shims, so nothing in the result can
- *      dangle outside the tree (a Nix store copy would lose such links).
- *   4. Drop the deploy-only documents and assert no link survived.
+ *   3. Materialize the links that leave the tree (`link:` overrides and
+ *      workspace packages); pnpm's internal relative links stay as they are.
+ *   4. Drop the deploy-only documents and assert no link leaves the tree.
  */
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { existsSync, globSync } from 'node:fs'
@@ -76,17 +75,40 @@ async function readManifest(directory) {
 /** Map every package name staged in node_modules to its directory. */
 async function stagedPackages() {
   const packages = new Map()
-  const walk = async (base, prefix = '') => {
+  const record = async (directory) => {
+    const manifest = await readManifest(directory)
+    if (manifest?.name !== undefined && !packages.has(manifest.name)) {
+      packages.set(manifest.name, { directory, manifest })
+    }
+  }
+  /**
+   * Walk the staged tree without following package links: pnpm's links form
+   * cycles (`.pnpm/node_modules/...` points back into the store), so only real
+   * directories are descended into.
+   */
+  const walk = async (base, depth = 0) => {
+    if (depth > 12) return
     for (const entry of await readdir(base, { withFileTypes: true })) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-      if (prefix === '' && (entry.name.startsWith('.') || entry.name === 'node_modules')) continue
-      const name = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.name === '.bin') continue
       const full = join(base, entry.name)
-      if (prefix === '' && entry.name.startsWith('@')) {
-        await walk(full, name)
+      if (entry.name.startsWith('@')) {
+        await walk(full, depth + 1)
         continue
       }
-      packages.set(name, full)
+      if (entry.isSymbolicLink()) {
+        await record(full)
+        continue
+      }
+      if (!entry.isDirectory()) continue
+      if (entry.name.startsWith('.')) {
+        // pnpm's isolated store: `.pnpm/<entry>/node_modules/<package>`.
+        const isolated = join(full, 'node_modules')
+        if (existsSync(isolated)) await walk(isolated, depth + 1)
+        continue
+      }
+      await record(full)
+      const nested = join(full, 'node_modules')
+      if (existsSync(nested)) await walk(nested, depth + 1)
     }
   }
   await walk(nodeModules)
@@ -163,9 +185,7 @@ async function completeClosure() {
   for (let round = 0; round < 32; round += 1) {
     const staged = await stagedPackages()
     const missing = new Map()
-    for (const [name, directory] of staged) {
-      const manifest = await readManifest(directory)
-      if (manifest === undefined) continue
+    for (const [name, { manifest }] of staged) {
       const required = {
         ...(manifest.dependencies ?? {}),
         ...(manifest.peerDependencies ?? {}),
@@ -184,6 +204,8 @@ async function completeClosure() {
         unresolvable.add(dependency)
         continue
       }
+      // Restore at the root: Node's resolver walks up to `<staging>/node_modules`
+      // from every pnpm store entry, so one copy satisfies all of them.
       const destination = join(nodeModules, dependency)
       await mkdir(dirname(destination), { recursive: true })
       await copyPackage(source, destination)
@@ -227,40 +249,57 @@ async function restoreLegacyHoists() {
   if (restored.length > 0) console.log(`deploy-carrier: restored legacy hoists: ${restored.join(', ')}`)
 }
 
-/** Return the first symbolic link below a directory, if one exists. */
-async function findSymlink(directory) {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    if ((await lstat(path)).isSymbolicLink()) return path
-    if (entry.isDirectory()) {
-      const nested = await findSymlink(path)
-      if (nested !== undefined) return nested
+/**
+ * List every symbolic link below a directory that does not resolve inside it.
+ *
+ * The deploy keeps pnpm's isolated linker, so most links are relative links
+ * into `<staging>/node_modules/.pnpm` and survive being copied into a store
+ * path untouched. Links to the built workspace (`link:` overrides and workspace
+ * packages) point outside the tree and have to become real files.
+ * @param directory - directory to walk.
+ * @param root - resolved directory that link targets must stay inside.
+ * @returns absolute paths of escaping or broken links.
+ */
+async function escapingSymlinks(directory, root) {
+  const escaping = []
+  const walk = async (base) => {
+    for (const entry of await readdir(base, { withFileTypes: true })) {
+      const path = join(base, entry.name)
+      if ((await lstat(path)).isSymbolicLink()) {
+        let target
+        try {
+          target = await realpath(path)
+        } catch {
+          escaping.push(path)
+          continue
+        }
+        if (target !== root && !target.startsWith(root + sep)) escaping.push(path)
+        continue
+      }
+      if (entry.isDirectory()) await walk(path)
     }
   }
-  return undefined
+  await walk(directory)
+  return escaping
 }
 
-/** Replace deploy-time package links with real files; reject any leftover link. */
-async function materializeStagedLinks() {
-  let remaining = await findSymlink(nodeModules)
-  let materialized = 0
-  while (remaining !== undefined) {
-    const segments = remaining.slice(nodeModules.length + 1).split(sep)
-    const binIndex = segments.lastIndexOf('.bin')
-    if (binIndex >= 0) {
-      // `.bin` shims are only meaningful for a linked install; nothing in the
-      // runtime resolves them (the CLI is wrapped explicitly).
-      await rm(join(nodeModules, ...segments.slice(0, binIndex + 1)), { recursive: true, force: true })
-      remaining = await findSymlink(nodeModules)
-      continue
+/** Replace links that leave the tree with the files they point at. */
+async function materializeEscapingLinks() {
+  const root = await realpath(staging)
+  const links = await escapingSymlinks(nodeModules, root)
+  for (const link of links) {
+    let source
+    try {
+      source = await realpath(link)
+    } catch {
+      throw new Error(`deploy-carrier: broken symbolic link in the deploy output: ${link}`)
     }
-    const source = await realpath(remaining)
-    await rm(remaining, { recursive: true, force: true })
-    await copyPackage(source, remaining)
-    materialized += 1
-    remaining = await findSymlink(nodeModules)
+    await rm(link, { recursive: true, force: true })
+    await copyPackage(source, link)
   }
-  console.log(`deploy-carrier: materialized ${String(materialized)} package link(s)`)
+  console.log(
+    `deploy-carrier: materialized ${String(links.length)} link(s) that pointed outside the runtime tree`,
+  )
 }
 
 /** Report the runtime size so the build log records what ships. */
@@ -277,14 +316,17 @@ async function directorySize(directory) {
 
 await restoreLegacyHoists()
 await completeClosure()
-await materializeStagedLinks()
+await materializeEscapingLinks()
 
 if (values['keep-docs'] !== true) {
   await Promise.all(DEPLOY_ONLY_DOCS.map(name => rm(join(staging, name), { force: true })))
 }
 
-const leftover = await findSymlink(staging)
-if (leftover !== undefined) throw new Error(`deploy-carrier: symbolic link survived materialization: ${leftover}`)
+const resolvedStaging = await realpath(staging)
+const leftover = await escapingSymlinks(staging, resolvedStaging)
+if (leftover.length > 0) {
+  throw new Error(`deploy-carrier: symbolic link(s) still leave the runtime tree: ${leftover.slice(0, 5).join(', ')}`)
+}
 if (!existsSync(join(staging, 'runtime-bootstrap.mjs'))) {
   throw new Error('deploy-carrier: runtime-bootstrap.mjs is missing from the staged closure')
 }
@@ -293,4 +335,4 @@ if (!existsSync(join(nodeModules, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) {
 }
 
 const megabytes = ((await directorySize(staging)) / 1024 / 1024).toFixed(1)
-console.log(`deploy-carrier: symlink-free runtime tree at ${staging} (${megabytes} MiB)`)
+console.log(`deploy-carrier: relocatable runtime tree at ${staging} (${megabytes} MiB)`)

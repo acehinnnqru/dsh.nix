@@ -182,12 +182,15 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
 
       mkdir -p $out/lib
       # The repository's own deploy root: every plugin the shipped profiles and
-      # the CLI need, with production dependencies only. `trustLockfile` skips
-      # the same registry-backed policy verification as the install above.
+      # the CLI need, with production dependencies only. It deliberately keeps
+      # pnpm's default (isolated) linker: `pnpm deploy` disables lockfile use
+      # when `node-linker=hoisted`, which would send it to the registry for a
+      # fresh resolution — impossible in a pure build. `trustLockfile` skips the
+      # same registry-backed policy verification as the install above, and
+      # `deploy-carrier.mjs` materializes the few links that leave the tree.
       pnpm --filter dsh-python-runtime-closure deploy \
         --legacy \
         --prod \
-        --config.node-linker=hoisted \
         --config.auto-install-peers=false \
         --config.link-workspace-packages=true \
         --config.trustLockfile=true \
