@@ -112,29 +112,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       inherit pnpm;
       fetcherVersion = 3;
       hash = resolvedHash;
-      # Capture pnpm's registry metadata cache next to the store: the legacy
-      # `pnpm deploy` in the build re-resolves the workspace and therefore needs
-      # package metadata, which the pure build cannot fetch.
-      prePnpmInstall = ''
-        pnpm config set cache-dir "$storePath/pnpm-cache"
-        # The frozen install that follows only downloads tarballs, so warm the
-        # metadata cache here, where the network is available:
-        #   1. one resolve-only pass over the whole lockfile (`--lockfile-only`
-        #      leaves pnpm-lock.yaml byte-identical, so the install below still
-        #      materialises exactly the closure this hash covers);
-        #   2. the very deploy the build runs, into a throwaway directory, which
-        #      caches the metadata that particular resolution asks for. Install
-        #      scripts are skipped in both places, so resolution is identical.
-        pnpm install --lockfile-only --force --ignore-scripts --config.minimumReleaseAge=0
-        warmDeploy=$(mktemp -d)
-        pnpm --filter dsh-python-runtime-closure deploy --legacy --prod \
-          --config.auto-install-peers=false \
-          --config.link-workspace-packages=true \
-          --config.ignore-scripts=true \
-          --config.trustLockfile=true \
-          "$warmDeploy" >/dev/null 2>&1 || true
-        rm -rf "$warmDeploy"
-      '';
+    };
     };
 
     nativeBuildInputs = [
@@ -197,37 +175,33 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     installPhase = ''
       runHook preInstall
 
-      mkdir -p $out/lib
-      # The repository's own deploy root: every plugin the shipped profiles and
-      # the CLI need, with production dependencies only. It deliberately keeps
-      # pnpm's default (isolated) linker: `pnpm deploy` disables lockfile use
-      # when `node-linker=hoisted`, which would send it to the registry for a
-      # fresh resolution — impossible in a pure build. `trustLockfile` skips the
-      # registry-backed policy verification, and `deploy-carrier.mjs`
-      # materializes the few links that leave the tree.
-      #
-      # `registry` points at a closed port on purpose: the legacy deploy still
-      # probes the registry for a handful of specs, and a refused connection
-      # makes pnpm fall back to the lockfile plus the installed store — the same
-      # result as a network-free build sandbox, but independent of whether this
-      # machine happens to have network access.
-      pnpm --filter dsh-python-runtime-closure deploy \
-        --legacy \
-        --prod \
-        --config.auto-install-peers=false \
-        --config.link-workspace-packages=true \
-        --config.ignore-scripts=true \
-        --config.trustLockfile=true \
-        --config.registry=http://127.0.0.1:9/ \
-        $out/lib/dsh
+      mkdir -p $out/lib/dsh
+      # Ship the built workspace exactly as `pnpm dsh` runs it: sources, the
+      # built `lib/` and web `dist/` artifacts, and the dependency tree installed
+      # above. Every workspace package, plugin and peer stays resolvable inside
+      # the tree, so no registry access is needed at build or run time. (The
+      # repository's slimmer `pnpm deploy` route cannot be used here: with
+      # `node-linker=hoisted` pnpm disables lockfile use and re-resolves the
+      # workspace against the registry, which a pure build cannot reach.)
+      tar -cf - \
+        --exclude=./.agents \
+        --exclude=./.github \
+        --exclude=./benchmarks \
+        --exclude=./docs \
+        --exclude=./snapshots \
+        --exclude=./website \
+        . | tar -xf - -C $out/lib/dsh
 
-      # Convert deploy-time links into real files so the tree is relocatable and
-      # store-safe (see the script for the deletions it also performs).
-      node ${./deploy-carrier.mjs} --root "$PWD" --staging "$out/lib/dsh"
+      # Verify the tree is relocatable (no link escapes it), complete, and
+      # executable where it has to be.
+      node ${./deploy-carrier.mjs} \
+        --root "$out/lib/dsh" \
+        --staging "$out/lib/dsh" \
+        --entry python/sdk-runtime/runtime-bootstrap.mjs
 
       makeWrapper ${lib.getExe nodejs} $out/bin/dsh \
         ${lib.optionalString exposeInternals "--add-flags --expose-internals"} \
-        --add-flags $out/lib/dsh/runtime-bootstrap.mjs \
+        --add-flags $out/lib/dsh/python/sdk-runtime/runtime-bootstrap.mjs \
         ${lib.optionalString (extraRuntimePath != [ ]) ''
           --prefix PATH : ${lib.makeBinPath extraRuntimePath} \
         ''}

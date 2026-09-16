@@ -1,21 +1,20 @@
 #!/usr/bin/env node
 /**
- * Turn a `pnpm --filter dsh-python-runtime-closure deploy --legacy --prod` output
- * into a symlink-free, relocatable runtime tree.
+ * Verify (and if necessary repair) the runtime tree the derivation ships.
  *
- * This mirrors `scripts/build-exe-for-python-sdk.ts` (`deployStaging`,
- * `restoreLegacyHoists`, `materializeStagedLinks`) from the harness repository,
- * minus the single-executable packaging that follows it there: the repository's
- * Node carrier is exactly this staged tree, run by a system Node.
+ * The tree is the built workspace: `python/sdk-runtime/runtime-bootstrap.mjs`
+ * plus `node_modules` installed from the frozen lockfile. Everything the CLI and
+ * the shipped profiles load has to be reachable from inside that directory, so
+ * this script checks the invariants a Nix store copy depends on:
  *
- * Steps:
- *   1. Restore direct dependencies the legacy hoister left beside the deploy
- *      source instead of inside the target.
+ *   1. Restore direct dependencies of the runtime manifest that are missing.
  *   2. Complete the closure: restore dependencies and required peer
- *      dependencies of staged packages that the deploy manifest omits.
- *   3. Materialize the links that leave the tree (`link:` overrides and
- *      workspace packages); pnpm's internal relative links stay as they are.
- *   4. Drop the deploy-only documents and assert no link leaves the tree.
+ *      dependencies of any package the tree is missing.
+ *   3. Materialize links that leave the tree (pnpm's own relative links into
+ *      `node_modules/.pnpm` are fine and stay as they are).
+ *   4. Restore executable bits on native helpers (the install skipped scripts).
+ *   5. Assert nothing links outside the tree, the entry point exists, and the
+ *      CLI package is in place.
  */
 import { chmod, cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { existsSync, globSync } from 'node:fs'
@@ -32,6 +31,7 @@ const { values } = parseArgs({
   options: {
     root: { type: 'string' },
     staging: { type: 'string' },
+    entry: { type: 'string', default: 'runtime-bootstrap.mjs' },
     'keep-docs': { type: 'boolean', default: false },
   },
 })
@@ -75,28 +75,26 @@ async function readManifest(directory) {
 /** Map every package name staged in node_modules to its directory. */
 async function stagedPackages() {
   const packages = new Map()
-  const record = async (directory) => {
+  // Keyed by the installed directory name, not `manifest.name`: npm aliases
+  // (`string-width-cjs: npm:string-width@…`) install under the alias, and that
+  // is the name Node resolves.
+  const record = async (directory, name) => {
+    if (packages.has(name)) return
     const manifest = await readManifest(directory)
-    if (manifest?.name !== undefined && !packages.has(manifest.name)) {
-      packages.set(manifest.name, { directory, manifest })
-    }
+    packages.set(name, { directory, manifest })
   }
   /**
    * Walk the staged tree without following package links: pnpm's links form
    * cycles (`.pnpm/node_modules/...` points back into the store), so only real
    * directories are descended into.
    */
-  const walk = async (base, depth = 0) => {
+  const walk = async (base, depth = 0, scope = '') => {
     if (depth > 12) return
     for (const entry of await readdir(base, { withFileTypes: true })) {
       if (entry.name === '.bin') continue
       const full = join(base, entry.name)
-      if (entry.name.startsWith('@')) {
-        await walk(full, depth + 1)
-        continue
-      }
-      if (entry.isSymbolicLink()) {
-        await record(full)
+      if (scope === '' && entry.name.startsWith('@')) {
+        await walk(full, depth + 1, entry.name)
         continue
       }
       if (!entry.isDirectory()) continue
@@ -106,7 +104,8 @@ async function stagedPackages() {
         if (existsSync(isolated)) await walk(isolated, depth + 1)
         continue
       }
-      await record(full)
+      const name = scope === '' ? entry.name : `${scope}/${entry.name}`
+      if ((await readManifest(full)) !== undefined) await record(full, name)
       const nested = join(full, 'node_modules')
       if (existsSync(nested)) await walk(nested, depth + 1)
     }
@@ -283,23 +282,36 @@ async function escapingSymlinks(directory, root) {
   return escaping
 }
 
-/** Replace links that leave the tree with the files they point at. */
+/**
+ * Replace links that leave the tree with the files they point at.
+ *
+ * Dangling links are left alone: pnpm leaves a few hundred of them for optional
+ * platform packages, the working development tree has the same, and nothing the
+ * harness loads at runtime resolves through them.
+ */
 async function materializeEscapingLinks() {
   const root = await realpath(staging)
   const links = await escapingSymlinks(nodeModules, root)
+  let materialized = 0
+  const dangling = []
   for (const link of links) {
     let source
     try {
       source = await realpath(link)
     } catch {
-      throw new Error(`deploy-carrier: broken symbolic link in the deploy output: ${link}`)
+      dangling.push(link)
+      continue
     }
     await rm(link, { recursive: true, force: true })
     await copyPackage(source, link)
+    materialized += 1
   }
-  console.log(
-    `deploy-carrier: materialized ${String(links.length)} link(s) that pointed outside the runtime tree`,
-  )
+  if (materialized > 0) {
+    console.log(`deploy-carrier: materialized ${String(materialized)} link(s) that pointed outside the runtime tree`)
+  }
+  if (dangling.length > 0) {
+    console.log(`deploy-carrier: left ${String(dangling.length)} dangling optional link(s) in place`)
+  }
 }
 
 /**
@@ -352,15 +364,26 @@ if (values['keep-docs'] !== true) {
 }
 
 const resolvedStaging = await realpath(staging)
-const leftover = await escapingSymlinks(staging, resolvedStaging)
+const leftover = []
+for (const link of await escapingSymlinks(staging, resolvedStaging)) {
+  try {
+    await realpath(link)
+    leftover.push(link)
+  } catch {
+    // Dangling links cannot escape a store copy; they are reported above.
+  }
+}
 if (leftover.length > 0) {
   throw new Error(`deploy-carrier: symbolic link(s) still leave the runtime tree: ${leftover.slice(0, 5).join(', ')}`)
 }
-if (!existsSync(join(staging, 'runtime-bootstrap.mjs'))) {
-  throw new Error('deploy-carrier: runtime-bootstrap.mjs is missing from the staged closure')
+if (!existsSync(join(staging, values.entry))) {
+  throw new Error(`deploy-carrier: the runtime entry ${values.entry} is missing from the tree`)
 }
-if (!existsSync(join(nodeModules, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) {
-  throw new Error('deploy-carrier: the staged closure has no @deepseek-ai/dsh entry')
+// The CLI has to be resolvable from the entry point's own directory, which is
+// where the bootstrap imports it from.
+const cliEntry = join(dirname(join(staging, values.entry)), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+if (!existsSync(cliEntry)) {
+  throw new Error(`deploy-carrier: the CLI is not resolvable from the runtime entry (${cliEntry})`)
 }
 
 const megabytes = ((await directorySize(staging)) / 1024 / 1024).toFixed(1)
