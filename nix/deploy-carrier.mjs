@@ -283,11 +283,12 @@ async function escapingSymlinks(directory, root) {
 }
 
 /**
- * Replace links that leave the tree with the files they point at.
+ * Replace links that leave the tree with the files they point at, and drop
+ * dangling ones.
  *
- * Dangling links are left alone: pnpm leaves a few hundred of them for optional
- * platform packages, the working development tree has the same, and nothing the
- * harness loads at runtime resolves through them.
+ * pnpm leaves a few hundred dangling links for optional platform packages (the
+ * working development tree has the same, and nothing the harness loads resolves
+ * through them), but a Nix store path may not contain them, so they go.
  */
 async function materializeEscapingLinks() {
   const root = await realpath(staging)
@@ -309,8 +310,9 @@ async function materializeEscapingLinks() {
   if (materialized > 0) {
     console.log(`deploy-carrier: materialized ${String(materialized)} link(s) that pointed outside the runtime tree`)
   }
+  for (const link of dangling) await rm(link, { recursive: true, force: true })
   if (dangling.length > 0) {
-    console.log(`deploy-carrier: left ${String(dangling.length)} dangling optional link(s) in place`)
+    console.log(`deploy-carrier: removed ${String(dangling.length)} dangling optional link(s)`)
   }
 }
 

@@ -182,14 +182,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       # repository's slimmer `pnpm deploy` route cannot be used here: with
       # `node-linker=hoisted` pnpm disables lockfile use and re-resolves the
       # workspace against the registry, which a pure build cannot reach.)
-      tar -cf - \
-        --exclude=./.agents \
-        --exclude=./.github \
-        --exclude=./benchmarks \
-        --exclude=./docs \
-        --exclude=./snapshots \
-        --exclude=./website \
-        . | tar -xf - -C $out/lib/dsh
+      tar -cf - . | tar -xf - -C $out/lib/dsh
 
       # Verify the tree is relocatable (no link escapes it), complete, and
       # executable where it has to be.
