@@ -17,7 +17,7 @@
  *      workspace packages); pnpm's internal relative links stay as they are.
  *   4. Drop the deploy-only documents and assert no link leaves the tree.
  */
-import { cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { existsSync, globSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -302,6 +302,34 @@ async function materializeEscapingLinks() {
   )
 }
 
+/**
+ * Restore executable bits on native helpers.
+ *
+ * The deploy skips install scripts (`--ignore-scripts`) so resolution stays
+ * identical to the fixed-output warm-up, which also means the workspace
+ * postinstall that re-marks node-pty's prebuilt spawn helper is not run. It
+ * matters on macOS: pnpm's store normalizes file modes, and a non-executable
+ * `spawn-helper` breaks every PTY-backed tool.
+ */
+async function restoreNativeHelpers() {
+  const helpers = []
+  const walk = async (base) => {
+    for (const entry of await readdir(base, { withFileTypes: true })) {
+      const path = join(base, entry.name)
+      if (entry.isDirectory()) {
+        await walk(path)
+        continue
+      }
+      if (entry.name === 'spawn-helper' || entry.name.startsWith('spawn-helper.')) helpers.push(path)
+    }
+  }
+  await walk(nodeModules)
+  for (const helper of helpers) await chmod(helper, 0o755)
+  if (helpers.length > 0) {
+    console.log(`deploy-carrier: restored ${String(helpers.length)} native helper permission(s)`)
+  }
+}
+
 /** Report the runtime size so the build log records what ships. */
 async function directorySize(directory) {
   let total = 0
@@ -317,6 +345,7 @@ async function directorySize(directory) {
 await restoreLegacyHoists()
 await completeClosure()
 await materializeEscapingLinks()
+await restoreNativeHelpers()
 
 if (values['keep-docs'] !== true) {
   await Promise.all(DEPLOY_ONLY_DOCS.map(name => rm(join(staging, name), { force: true })))

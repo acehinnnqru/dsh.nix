@@ -113,15 +113,27 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       fetcherVersion = 3;
       hash = resolvedHash;
       # Capture pnpm's registry metadata cache next to the store: the legacy
-      # `pnpm deploy` below re-resolves the workspace and therefore needs
+      # `pnpm deploy` in the build re-resolves the workspace and therefore needs
       # package metadata, which the pure build cannot fetch.
       prePnpmInstall = ''
         pnpm config set cache-dir "$storePath/pnpm-cache"
         # The frozen install that follows only downloads tarballs, so warm the
-        # metadata cache with one resolve-only pass over the whole lockfile.
-        # `--lockfile-only` leaves pnpm-lock.yaml byte-identical, so the install
-        # still materialises exactly the closure this hash covers.
+        # metadata cache here, where the network is available:
+        #   1. one resolve-only pass over the whole lockfile (`--lockfile-only`
+        #      leaves pnpm-lock.yaml byte-identical, so the install below still
+        #      materialises exactly the closure this hash covers);
+        #   2. the very deploy the build runs, into a throwaway directory, which
+        #      caches the metadata that particular resolution asks for. Install
+        #      scripts are skipped in both places, so resolution is identical.
         pnpm install --lockfile-only --force --ignore-scripts --config.minimumReleaseAge=0
+        warmDeploy=$(mktemp -d)
+        pnpm --filter dsh-python-runtime-closure deploy --legacy --prod \
+          --config.auto-install-peers=false \
+          --config.link-workspace-packages=true \
+          --config.ignore-scripts=true \
+          --config.trustLockfile=true \
+          "$warmDeploy" >/dev/null 2>&1 || true
+        rm -rf "$warmDeploy"
       '';
     };
 
@@ -204,6 +216,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
         --prod \
         --config.auto-install-peers=false \
         --config.link-workspace-packages=true \
+        --config.ignore-scripts=true \
         --config.trustLockfile=true \
         --config.registry=http://127.0.0.1:9/ \
         $out/lib/dsh
