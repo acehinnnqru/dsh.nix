@@ -126,7 +126,7 @@
           default = pkgs.mkShell {
             packages = [
               dsh.node
-              dsh.pnpmPackage
+              dsh.pnpm
               pkgs.git
               pkgs.jq
               pkgs.ripgrep

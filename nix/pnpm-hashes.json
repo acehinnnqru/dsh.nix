@@ -1,0 +1,4 @@
+{
+  "_comment": "Registry sha256 of the pnpm releases this packaging builds, keyed by version. Register one with `nix run .#update-hashes -- pnpm`.",
+  "11.7.0": "sha256-3q+n7JihIYtqBHKJuS++I5XB4i00lbtxFlMBMhjuFe4="
+}

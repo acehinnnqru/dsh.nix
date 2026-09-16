@@ -21,11 +21,11 @@
 {
   lib,
   stdenv,
+  callPackage,
   fetchPnpmDeps,
   makeWrapper,
   writableTmpDirAsHomeHook,
   nodejs_24,
-  pnpm_11,
   src,
   # Reported by `dsh --version` and embedded in the web frontend.
   version ? (builtins.fromJSON (builtins.readFile "${src}/package.json")).version,
@@ -41,8 +41,11 @@
   # Explicit override; otherwise looked up in `hashesFile` by lockfile hash.
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
+  pnpmHashesFile ? ./pnpm-hashes.json,
   nodejs ? nodejs_24,
-  pnpm ? pnpm_11,
+  # Override the package manager explicitly; by default the release the source
+  # pins in `packageManager` is built from the npm registry (see nix/pnpm.nix).
+  pnpmPackage ? null,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
@@ -63,8 +66,33 @@ let
       lib.fakeHash;
 
   missingHash = pnpmDepsHash == null && !(registered ? ${stdenv.hostPlatform.system});
+
+  # The repository declares its package manager (`"packageManager": "pnpm@x.y.z"`);
+  # building exactly that release keeps resolution identical to upstream CI.
+  declaredPackageManager =
+    (builtins.fromJSON (builtins.readFile "${src}/package.json")).packageManager or "";
+  pnpmVersion =
+    if lib.hasPrefix "pnpm@" declaredPackageManager then
+      lib.removePrefix "pnpm@" declaredPackageManager
+    else
+      "11.7.0";
+  pnpmHashes = builtins.fromJSON (builtins.readFile pnpmHashesFile);
+  pnpmHash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
+  pnpm =
+    if pnpmPackage != null then
+      pnpmPackage
+    else
+      callPackage ./pnpm.nix {
+        version = pnpmVersion;
+        hash = pnpmHash;
+      };
 in
-lib.warnIf missingHash ''
+lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
+  dsh: no registry hash for pnpm ${pnpmVersion} (the release ${version} pins);
+  building with a placeholder hash so Nix prints the real one. Register it with:
+    nix run .#update-hashes -- pnpm
+''
+  (lib.warnIf missingHash ''
   dsh: no pnpm dependency hash registered for ${version} (lockfile key ${lockKey})
   on ${stdenv.hostPlatform.system}; building with a placeholder hash so Nix prints
   the real one. Register it with:  nix run .#update-hashes -- dsh
@@ -150,13 +178,14 @@ lib.warnIf missingHash ''
     };
 
     passthru = {
-      inherit lockKey;
+      inherit lockKey pnpmVersion;
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
-      pnpmPackage = pnpm;
+      inherit pnpm;
       # Version switching: `pkgs.dsh.override { src = ...; }`.
-      hashesFile = hashesFile;
+      inherit hashesFile pnpmHashesFile;
     };
   })
+  )
 )
