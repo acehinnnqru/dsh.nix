@@ -50,6 +50,11 @@
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
+  # The shipped web profile reloads user patches live, which loads
+  # `@deepseek-ai/cordis-plugin-hmr`; that plugin needs Node's internal module
+  # loader, reachable only through `--expose-internals` (the harness's own dev
+  # script passes it too). Without the flag `dsh web` fails to boot.
+  exposeInternals ? true,
   # Extra build inputs for exotic hosts.
   extraNativeBuildInputs ? [ ],
 }:
@@ -130,6 +135,12 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       # Never let `pnpm run` silently re-resolve dependencies (it would reach
       # for the registry and fail without a certificate bundle).
       pnpm_config_verify_deps_before_run = "false";
+      # pnpm 11 verifies the frozen lockfile against its supply-chain policy on
+      # every install, which needs registry metadata (and attestation fetches)
+      # even under `--offline`. The fixed-output fetch above already ran that
+      # verification with network access, so the build trusts the lockfile and
+      # stays offline. `pnpmInstallFlags` is read by nixpkgs' pnpm setup hook.
+      pnpmInstallFlags = "--config.trustLockfile=true";
       # 4 GiB heap for the aggregate TypeScript programs (matches `build:lib:host`).
       NODE_OPTIONS = "--max-old-space-size=4096";
     };
@@ -165,6 +176,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       node ${./deploy-carrier.mjs} --root "$PWD" --staging "$out/lib/dsh"
 
       makeWrapper ${lib.getExe nodejs} $out/bin/dsh \
+        ${lib.optionalString exposeInternals "--add-flags --expose-internals"} \
         --add-flags $out/lib/dsh/runtime-bootstrap.mjs \
         ${lib.optionalString (extraRuntimePath != [ ]) ''
           --prefix PATH : ${lib.makeBinPath extraRuntimePath} \

@@ -11,13 +11,15 @@
  * Steps:
  *   1. Restore direct dependencies the legacy hoister left beside the deploy
  *      source instead of inside the target.
- *   2. Replace every remaining symlink below `<staging>/node_modules` with the
+ *   2. Complete the closure: restore dependencies and required peer
+ *      dependencies of staged packages that the deploy manifest omits.
+ *   3. Replace every remaining symlink below `<staging>/node_modules` with the
  *      files it points at, dropping `.bin` shims, so nothing in the result can
  *      dangle outside the tree (a Nix store copy would lose such links).
- *   3. Drop the deploy-only documents and assert no link survived.
+ *   4. Drop the deploy-only documents and assert no link survived.
  */
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, globSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -60,6 +62,145 @@ async function copyPackage(source, destination) {
     dereference: true,
     filter: path => path !== nested && !path.startsWith(nested + sep),
   })
+}
+
+/** Read one package manifest, or undefined when the directory has none. */
+async function readManifest(directory) {
+  try {
+    return JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Map every package name staged in node_modules to its directory. */
+async function stagedPackages() {
+  const packages = new Map()
+  const walk = async (base, prefix = '') => {
+    for (const entry of await readdir(base, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+      if (prefix === '' && (entry.name.startsWith('.') || entry.name === 'node_modules')) continue
+      const name = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const full = join(base, entry.name)
+      if (prefix === '' && entry.name.startsWith('@')) {
+        await walk(full, name)
+        continue
+      }
+      packages.set(name, full)
+    }
+  }
+  await walk(nodeModules)
+  return packages
+}
+
+/** Map every workspace package name to its directory, from pnpm-workspace.yaml. */
+async function workspacePackages() {
+  const packages = new Map()
+  let yaml
+  try {
+    yaml = await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8')
+  } catch {
+    return packages
+  }
+  const patterns = []
+  let inPackages = false
+  for (const line of yaml.split('\n')) {
+    if (/^packages:/.test(line)) {
+      inPackages = true
+      continue
+    }
+    if (inPackages) {
+      const match = /^\s+-\s+(?<pattern>\S.*?)\s*$/.exec(line)
+      if (match?.groups === undefined) {
+        inPackages = false
+        continue
+      }
+      patterns.push(match.groups.pattern.replace(/^['"]|['"]$/g, ''))
+    }
+  }
+  const matched = globSync(
+    patterns.map(pattern => `${pattern}/package.json`),
+    { cwd: root },
+  )
+  for (const relative of matched) {
+    const directory = dirname(join(root, relative))
+    const manifest = await readManifest(directory)
+    if (manifest?.name !== undefined) packages.set(manifest.name, directory)
+  }
+  return packages
+}
+
+/**
+ * Complete the deployed closure.
+ *
+ * The deploy root manifest is supposed to name every runtime dependency
+ * explicitly, because the deploy runs with `auto-install-peers=false`. It can
+ * lag behind the plugin graph: at `dsh-v0.1.5-rc.1` the session-title plugin
+ * peers on `@deepseek-ai/dsh-session-title-llm` and the API session controller
+ * peers on `@deepseek-ai/dsh-util-workspace-path`, neither of which the
+ * manifest lists — `dsh web` then dies importing the plugin (`master` lists
+ * both). Restoring the dependency and peer invariants from the built workspace
+ * keeps the tagged release bootable, and stays a no-op for revisions whose
+ * manifest is complete.
+ */
+async function completeClosure() {
+  const workspace = await workspacePackages()
+  const restored = []
+  const unresolvable = new Set()
+
+  /** Prefer the workspace package, then the project's own links, then root. */
+  const sourceFor = (name, dependent) => {
+    const candidates = []
+    const workspaceDirectory = workspace.get(name)
+    if (workspaceDirectory !== undefined) candidates.push(workspaceDirectory)
+    if (dependent !== undefined && workspace.has(dependent)) {
+      candidates.push(join(workspace.get(dependent), 'node_modules', name))
+    }
+    candidates.push(join(root, 'node_modules', name))
+    return candidates.find(candidate => existsSync(candidate))
+  }
+
+  for (let round = 0; round < 32; round += 1) {
+    const staged = await stagedPackages()
+    const missing = new Map()
+    for (const [name, directory] of staged) {
+      const manifest = await readManifest(directory)
+      if (manifest === undefined) continue
+      const required = {
+        ...(manifest.dependencies ?? {}),
+        ...(manifest.peerDependencies ?? {}),
+      }
+      for (const dependency of Object.keys(required)) {
+        if (staged.has(dependency) || restored.includes(dependency) || unresolvable.has(dependency)) continue
+        if (manifest.peerDependenciesMeta?.[dependency]?.optional === true) continue
+        missing.set(dependency, name)
+      }
+    }
+    if (missing.size === 0) break
+    let copied = 0
+    for (const [dependency, dependent] of missing) {
+      const source = sourceFor(dependency, dependent)
+      if (source === undefined) {
+        unresolvable.add(dependency)
+        continue
+      }
+      const destination = join(nodeModules, dependency)
+      await mkdir(dirname(destination), { recursive: true })
+      await copyPackage(source, destination)
+      restored.push(dependency)
+      copied += 1
+    }
+    if (copied === 0) break
+  }
+
+  if (restored.length > 0) {
+    console.log(`deploy-carrier: restored packages the deploy manifest omitted: ${restored.join(', ')}`)
+  }
+  if (unresolvable.size > 0) {
+    throw new Error(
+      `deploy-carrier: staged packages require ${[...unresolvable].join(', ')}, which the built workspace does not provide`,
+    )
+  }
 }
 
 /** Restore direct packages pnpm's legacy hoister left beside the deploy source. */
@@ -135,6 +276,7 @@ async function directorySize(directory) {
 }
 
 await restoreLegacyHoists()
+await completeClosure()
 await materializeStagedLinks()
 
 if (values['keep-docs'] !== true) {
