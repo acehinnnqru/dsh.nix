@@ -2,11 +2,17 @@
   "_comment": "pnpm dependency closure hashes, keyed by the first 16 hex characters of sha256(pnpm-lock.yaml). Register a revision with `nix run .#update-hashes`.",
   "_example": {
     "0123456789abcdef": {
-      "version": "0.1.5-rc.1",
       "hashes": {
         "aarch64-darwin": "sha256-AAAA...=",
         "x86_64-linux": "sha256-BBBB...="
-      }
+      },
+      "version": "0.1.5-rc.1"
     }
+  },
+  "a6515566578a26c2": {
+    "hashes": {
+      "aarch64-darwin": "sha256-P7Dtm6qInTTXoDHcx4V2CfTlVK/0Rjl0omm3W3nQXqE="
+    },
+    "version": "0.1.5-rc.1"
   }
 }

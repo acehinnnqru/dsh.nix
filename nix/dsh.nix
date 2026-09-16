@@ -156,8 +156,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
         --add-flags $out/lib/dsh/runtime-bootstrap.mjs \
         ${lib.optionalString (extraRuntimePath != [ ]) ''
           --prefix PATH : ${lib.makeBinPath extraRuntimePath} \
-        ''} \
-        --set-default DSH_CLIENT_VERSION ${lib.escapeShellArg version}
+        ''}
 
       runHook postInstall
     '';

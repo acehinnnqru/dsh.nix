@@ -59,6 +59,8 @@
             pkgs.jq
           ];
           text = builtins.readFile ./nix/update-hashes.sh;
+          # jq programs pass `$field` names inside single quotes on purpose.
+          excludeShellChecks = [ "SC2016" ];
         };
     in
     {
