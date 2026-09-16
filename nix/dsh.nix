@@ -23,6 +23,7 @@
   stdenv,
   callPackage,
   fetchPnpmDeps,
+  pnpmConfigHook,
   makeWrapper,
   writableTmpDirAsHomeHook,
   nodejs_24,
@@ -111,6 +112,10 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     nativeBuildInputs = [
       nodejs
       pnpm
+      # Unpacks `pnpmDeps` into a store dir and runs the offline install in
+      # `postConfigure`; it has to be listed explicitly (it also provides zstd
+      # and a writable $HOME).
+      pnpmConfigHook
       makeWrapper
       writableTmpDirAsHomeHook
     ] ++ extraNativeBuildInputs;
@@ -122,6 +127,9 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
       # Keep every pnpm invocation offline; the store already holds the closure.
       npm_config_offline = "true";
+      # Never let `pnpm run` silently re-resolve dependencies (it would reach
+      # for the registry and fail without a certificate bundle).
+      pnpm_config_verify_deps_before_run = "false";
       # 4 GiB heap for the aggregate TypeScript programs (matches `build:lib:host`).
       NODE_OPTIONS = "--max-old-space-size=4096";
     };
@@ -130,6 +138,10 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     # `postConfigure`, so the build phase starts from a complete `node_modules`.
     buildPhase = ''
       runHook preBuild
+      if [ ! -d node_modules/.pnpm ]; then
+        echo "dsh: the pnpm setup hook did not populate node_modules" >&2
+        exit 1
+      fi
       pnpm run build
       runHook postBuild
     '';
