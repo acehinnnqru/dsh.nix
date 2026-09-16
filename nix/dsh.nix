@@ -56,7 +56,7 @@
 let
   lockKey = builtins.substring 0 16 (builtins.hashFile "sha256" "${src}/pnpm-lock.yaml");
   registry = builtins.fromJSON (builtins.readFile hashesFile);
-  registered = registry.${lockKey} or { };
+  registered = registry.${lockKey}.hashes or { };
   resolvedHash =
     if pnpmDepsHash != null then
       pnpmDepsHash
