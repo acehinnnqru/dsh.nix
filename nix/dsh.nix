@@ -162,13 +162,15 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
 
       mkdir -p $out/lib
       # The repository's own deploy root: every plugin the shipped profiles and
-      # the CLI need, with production dependencies only.
+      # the CLI need, with production dependencies only. `trustLockfile` skips
+      # the same registry-backed policy verification as the install above.
       pnpm --filter dsh-python-runtime-closure deploy \
         --legacy \
         --prod \
         --config.node-linker=hoisted \
         --config.auto-install-peers=false \
         --config.link-workspace-packages=true \
+        --config.trustLockfile=true \
         $out/lib/dsh
 
       # Convert deploy-time links into real files so the tree is relocatable and
