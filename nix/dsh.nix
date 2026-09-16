@@ -191,14 +191,21 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       # pnpm's default (isolated) linker: `pnpm deploy` disables lockfile use
       # when `node-linker=hoisted`, which would send it to the registry for a
       # fresh resolution — impossible in a pure build. `trustLockfile` skips the
-      # same registry-backed policy verification as the install above, and
-      # `deploy-carrier.mjs` materializes the few links that leave the tree.
+      # registry-backed policy verification, and `deploy-carrier.mjs`
+      # materializes the few links that leave the tree.
+      #
+      # `registry` points at a closed port on purpose: the legacy deploy still
+      # probes the registry for a handful of specs, and a refused connection
+      # makes pnpm fall back to the lockfile plus the installed store — the same
+      # result as a network-free build sandbox, but independent of whether this
+      # machine happens to have network access.
       pnpm --filter dsh-python-runtime-closure deploy \
         --legacy \
         --prod \
         --config.auto-install-peers=false \
         --config.link-workspace-packages=true \
         --config.trustLockfile=true \
+        --config.registry=http://127.0.0.1:9/ \
         $out/lib/dsh
 
       # Convert deploy-time links into real files so the tree is relocatable and
