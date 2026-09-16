@@ -1,0 +1,6 @@
+# Local scratch space used while developing this packaging.
+/.rehearsal/
+
+# `nix build` result symlinks.
+/result
+/result-*
