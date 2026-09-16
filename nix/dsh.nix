@@ -113,7 +113,6 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       fetcherVersion = 3;
       hash = resolvedHash;
     };
-    };
 
     nativeBuildInputs = [
       nodejs
