@@ -25,6 +25,7 @@
   fetchPnpmDeps,
   makeWrapper,
   writableTmpDirAsHomeHook,
+  zstd,
   nodejs_24,
   src,
   # Reported by `dsh --version` and embedded in the web frontend.
