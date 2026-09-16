@@ -23,7 +23,6 @@
   stdenv,
   callPackage,
   fetchPnpmDeps,
-  pnpmConfigHook,
   makeWrapper,
   writableTmpDirAsHomeHook,
   nodejs_24,
@@ -112,17 +111,21 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       inherit pnpm;
       fetcherVersion = 3;
       hash = resolvedHash;
+      # Capture pnpm's registry metadata cache next to the store: the legacy
+      # `pnpm deploy` below re-resolves the workspace without reading a lockfile
+      # and therefore needs package metadata, which the pure build cannot fetch.
+      prePnpmInstall = ''
+        pnpm config set cache-dir "$storePath/pnpm-cache"
+      '';
     };
 
     nativeBuildInputs = [
       nodejs
       pnpm
-      # Unpacks `pnpmDeps` into a store dir and runs the offline install in
-      # `postConfigure`; it has to be listed explicitly (it also provides zstd
-      # and a writable $HOME).
-      pnpmConfigHook
       makeWrapper
       writableTmpDirAsHomeHook
+      # `tar --zstd` unpacks the fetched dependency store (nix/pnpm.nix).
+      zstd
     ] ++ extraNativeBuildInputs;
 
     env = {
@@ -130,23 +133,39 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       DSH_CLIENT_COMMIT_HASH = commitHash;
       # The desktop app is outside this closure and its binary is never built.
       ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
+      # pnpm would otherwise insist on the `packageManager` pin it reads from
+      # package.json, which corepack normally provides.
+      pnpm_config_pm_on_fail = "ignore";
       # Keep every pnpm invocation offline; the store already holds the closure.
       npm_config_offline = "true";
       # Never let `pnpm run` silently re-resolve dependencies (it would reach
       # for the registry and fail without a certificate bundle).
       pnpm_config_verify_deps_before_run = "false";
-      # pnpm 11 verifies the frozen lockfile against its supply-chain policy on
-      # every install, which needs registry metadata (and attestation fetches)
-      # even under `--offline`. The fixed-output fetch above already ran that
-      # verification with network access, so the build trusts the lockfile and
-      # stays offline. `pnpmInstallFlags` is read by nixpkgs' pnpm setup hook.
-      pnpmInstallFlags = "--config.trustLockfile=true";
       # 4 GiB heap for the aggregate TypeScript programs (matches `build:lib:host`).
       NODE_OPTIONS = "--max-old-space-size=4096";
     };
 
-    # `pnpmConfigHook` (installed by `pnpmDeps`) runs the offline install in
-    # `postConfigure`, so the build phase starts from a complete `node_modules`.
+    # Unpack the fixed-output dependency store and run the offline install, the
+    # job nixpkgs' `pnpmConfigHook` does — plus the metadata cache above, which
+    # the hook does not know about.
+    configurePhase = ''
+      runHook preConfigure
+
+      export STORE_PATH=$(mktemp -d)
+      tar --zstd -xf ${finalAttrs.pnpmDeps}/pnpm-store.tar.zst -C "$STORE_PATH"
+      chmod -R +w "$STORE_PATH"
+      pnpm config set store-dir "$STORE_PATH"
+      pnpm config set cache-dir "$STORE_PATH/pnpm-cache"
+      # Hard links are unavailable across some store filesystems.
+      pnpm config set package-import-method clone-or-copy
+
+      echo "Installing dependencies"
+      pnpm install --offline --ignore-scripts --frozen-lockfile --config.trustLockfile=true
+      patchShebangs node_modules/{*,.*}
+
+      runHook postConfigure
+    '';
+
     buildPhase = ''
       runHook preBuild
       if [ ! -d node_modules/.pnpm ]; then
