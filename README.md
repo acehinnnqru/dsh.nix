@@ -34,13 +34,30 @@ nix profile install github:acehinnnqru/dsh.nix
 
 ### 为什么是「整棵 workspace」而不是上游的精简 deploy 闭包
 
-上游 `python/sdk-runtime` 的打包路线是 `pnpm deploy --legacy --prod`，产物约 230 MB。
-但它在构建期会**重新解析整个 workspace**：`pnpm deploy` 在 `node-linker=hoisted` 时会关掉
-lockfile（pnpm 源码里就是 `useLockfile: opts.nodeLinker !== "hoisted"`），于是即使有 lockfile
-也要去 registry 取 packument；纯 Nix 构建没有网络，这条路线跑不通（试过 `trustLockfile`、
-把 pnpm 元数据缓存塞进 FOD、黑洞 registry、从零解析预热等手段，都会在别处重新解析）。
-所以这里选择上游自己 `pnpm dsh` 跑的那棵树：闭包一定完整、可离线构建，代价是**体积约 1.3 GB**
-（含 dev 依赖与测试）。想更瘦只能改成「构建期联网」或改用上游的单文件 exe 路线。
+上游 `python/sdk-runtime` 的打包路线是 `pnpm deploy --legacy --prod`，产物约 230 MB，但它在构建期
+会**重新解析整个 workspace**：`pnpm deploy` 的 legacy 路径在 `node-linker=hoisted` 时关掉 lockfile
+（pnpm 源码里就是 `useLockfile: opts.nodeLinker !== "hoisted"`），于是即使有 lockfile 也要去 registry
+取 packument；纯 Nix 构建没有网络，这条路线跑不通（试过 `--config.trustLockfile`、把 pnpm 元数据缓存
+塞进 FOD、黑洞 registry、从零解析预热、以及"先开 injection 再安装"等手段，都会在别处重新解析）。
+
+社区仓库 [moraxyc/deepseek-harness.nix](https://github.com/moraxyc/deepseek-harness.nix) 确实做到了精简
+闭包，但做法不是加一个 flag，而是换掉整条链路：
+
+- 自建 **`importPnpmLock`**：把 `pnpm-lock.yaml` / `pnpm-workspace.yaml` 预先转成仓库内的
+  `pnpm-lock.json` / `pnpm-workspace.json`，并配一个自己钉的 pnpm（`pnpmWorkspaceDeploy`）；
+- 用 **injected deploy**（`inject-workspace-packages` + 不带 `--legacy`）逐个
+  `pnpm --filter … deploy --prod` 出 kernel / 每个 bundle / desktop；
+- 用 `dshWorkspacePatchHook` 和两个补丁（`--expose-internals` loader、CSS 结果确定性）**改上游源码**，
+  并新增 `apps/nix-kernel`；
+- 公共 `dsh` 是一个 `stdenvNoCC` **组装**派生（`src = null`）：kernel 的 `lib` +
+  `symlinkJoin` 出来的 `node_modules` + profile/bundle 清单，最后
+  `makeWrapper nodejs-slim … --expose-internals`；
+- 多输出（`out` / `cohort` / `kernel` / `desktop`）+ Cachix 预构建，用户直接 substitute。
+
+本仓库当前选择的是**零补丁 + 全离线**的路线：直接用上游 `pnpm dsh` 运行的那棵树，闭包一定完整、
+不需要补丁也不需要二进制缓存，代价是**体积约 1.3 GB**（含 dev 依赖与测试）。想进一步变瘦，正确做法
+是按上面那套架构重做打包（或直接用社区仓库的产物）；只调 deploy 的 flag 达不到 —— injected deploy
+要求 lockfile 里已经带 injection 记录，而那需要一次联网解析加上仓库自己的 lockfile 工具链。
 
 ## 用法
 
