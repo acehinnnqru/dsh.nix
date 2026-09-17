@@ -97,7 +97,7 @@ lib.warnIf missingHash ''
     pname = "dsh";
     inherit version src;
 
-    pnpmDeps = fetchPnpmDeps {
+    pnpmDeps = (fetchPnpmDeps {
       pname = "dsh";
       inherit version src pnpm;
       fetcherVersion = 3;
@@ -112,7 +112,15 @@ lib.warnIf missingHash ''
         pnpm config set cache-dir "$storePath/pnpm-cache"
         ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
       '';
-    };
+    }).overrideAttrs (old: {
+      # nixpkgs' fetcher passes `--force`, which downloads every platform build
+      # of the workspace's per-platform optional dependencies (~1.4 GB of
+      # @openai/codex-* and @anthropic-ai/claude-agent-sdk-* binaries). Those
+      # are never installed here — hashes are registered per platform — and the
+      # download is what exhausted the builder's file handles. Keep everything
+      # else about the fetcher (store setup, reproducible tarball, fixups).
+      installPhase = lib.replaceStrings [ "--force" ] [ "" ] old.installPhase;
+    });
 
     nativeBuildInputs = [
       nodejs
