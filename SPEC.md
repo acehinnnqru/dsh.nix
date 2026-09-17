@@ -51,7 +51,7 @@ ERR_PNPM_INVALID_VERSION_UNION  Invalid versions union.
 Found: "@deepseek-ai/dsh-subprocess-local@file:packages/subprocess/subprocess-local". Use exact versions only.
 ```
 
-已定位到来源：上游 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 里有一条 workspace 链接条目的记录
+已定位到来源：上游 `pnpm-workspace.yaml` 里**两条**设置都记录了 workspace 链接条目（实际触发报错的是第一条）
 
 ```yaml
 minimumReleaseAgeExclude:
@@ -60,6 +60,14 @@ minimumReleaseAgeExclude:
 ```
 
 pnpm 11.25 把该设置按 `包名@精确版本||精确版本` 解析（`parseVersionPolicyRule` → `semver.valid`），`file:` 不是合法 semver，于是硬失败。上游 `package.json` 写的是 `packageManager: pnpm@11.7.0`，即这条配置是为 11.7.0 写的。**当前 `nix/dsh.nix` 把 pnpm 覆写成 11.25.0，与上游锁定的包管理器不一致。**
+
+实际触发的是 `allowBuilds`（`prepare-runtime.py` 原本就在过滤它）；`minimumReleaseAgeExclude` 在 0.1.5-rc.1 里没有 `@file:` 条目，但 11.25 对两者用同一套解析，所以两处都要处理。
+
+**阻塞 4（第 3 个阻塞之外，执行中才暴露）：** 构建沙箱里 pnpm 在 `pnpm install --force` 结束时以
+`Assertion failed: (errno == EINTR), function uv__io_poll, file kqueue.c, line 279` 中止，
+此前 Node 已多次报 `File descriptor N closed but not opened in unmanaged mode`。
+同样的安装用 `pnpm@11.25.0` + Node 22 跑就正常，用 Node 24 必崩（同一命令、同一 store、可重复）。
+处理：`pnpm` 改用 Node 22（`pnpmNode`），安装出来的 `dsh` 仍用 Node 24（`runtimeNode`）。
 
 补充事实（用于决策）：
 
@@ -109,6 +117,9 @@ pnpm 11.25 把该设置按 `包名@精确版本||精确版本` 解析（`parseVe
 
 **验收**：在**干净 git 树**上 `nix build .#dsh --dry-run` 通过求值（不再出现 missing metadata）。
 
+> 实际实现：改为记录 `metadataFormat` 并断言（版本号本身就是随源码生成的，自比没有意义），
+> `import-pnpm-lock.nix` 会在格式不符时报错而不是按旧字段语义误读。
+
 ### 步骤 2：修好依赖获取与安装（阻塞 3 + 完整 store）
 
 1. 按决定 A2：固定 `pnpm 11.25.0`；`prepare-runtime.py` 精确改写 `minimumReleaseAgeExclude` / `allowBuilds` 中的 `@file:` 记录，并补回归测试（现成的 `test-prepare-runtime.py` 已用 unittest 覆盖 manifest 生成逻辑，扩展它即可）。
@@ -149,8 +160,44 @@ pnpm 11.25 把该设置按 `包名@精确版本||精确版本` 解析（`parseVe
 
 ---
 
-## 4. 风险与未决点
+## 4. 执行结果（本轮已完成）
 
-1. **`pnpm deploy` 与新增 lock importer 的兼容性**：`prepare-runtime.py` 往 lock 里插 `apps/nix-runtime` importer。pnpm 的 frozen-lockfile 校验是否接受它，需要用一次 5 分钟实验确认；若不接受，退路是"部署时用 `--prod` 单独安装到临时目录再组装"，仍然不需要复制补齐逻辑。
-2. **改写上游 workspace 配置的边界（决定 A2 的代价）**：改写只允许两类——删除指向 workspace 链接的 `minimumReleaseAgeExclude` 条目、把 `allowBuilds` 的 `@file:` 键归一到裸包名。任何"为了让它装上"的删除都必须先有 `test-prepare-runtime.py` 的回归断言，并且构建日志里要能看出改写了什么；不允许静默吞掉配置错误。
-3. **node-pty helper 的可执行位**：上游用 `@deepseek-ai/dsh-subprocess-local` 的 postinstall 修复，而部署时 `--ignore-scripts`。现有做法是在部署后单独调用上游脚本；这一处要在步骤 3 的 PTY 检查里被真实验证覆盖。
+| 步骤 | 结果 |
+|---|---|
+| 1 元数据入库 | 完成。`nix/metadata/{a6515566578a26c2,ca131858949bd12b}` 已提交；干净 git 树上 `nix build .#dsh --dry-run` 通过求值 |
+| 2 依赖获取与安装 | 完成。`pnpm 11.25.0`（Node 22）+ 逐包 integrity 下载 + 离线 store；`prepare-runtime.py` 的改写带回归测试 |
+| 2' 打包路径 | 完成。发现并修掉三处：`injectWorkspacePackages` 只认 `pnpm-workspace.yaml`；runtime importer 必须按 root override 重新定位；spawn-helper 必须从部署树内运行 |
+| 3 运行验收 | 完成，见下表 |
+| 4 文档与接口 | 完成。README 只记录实际通过的内容；对外接口未变 |
+
+验收命令与结果（真实 `nix build` 产物，非本地拼装）：
+
+```
+$ nix build .#dsh && ./result/bin/dsh --version
+0.1.5-rc.1
+$ python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
+PTY: passed
+{"version": "0.1.5-rc.1", "cli": "passed", "web": "passed", "assets": 4}
+```
+
+| 检查 | 结果 |
+|---|---|
+| CLI `--version` / `--help` | 通过（构建内 `installCheckPhase` + 沙箱外 smoke） |
+| PTY 真实开终端跑命令 | 通过 |
+| Web 首页 + 页面引用的 4 个资源 | 通过 |
+| 运行时可达依赖全部可解析、无链接逃逸 | 通过（501 个 manifest、11 个链接） |
+| 无指向构建目录的链接 / 不依赖 `.scratch` 或旧 `result` | 通过 |
+| `dsh-nightly` 可构建 | 通过（`0.1.6-alpha.1`），未做运行验收 |
+
+保留的已知限制：
+
+- 只声明 `aarch64-darwin`；其他架构没有构建与运行验证。
+- 部署产物的 `pnpm-lock.yaml` 与客户端 bundle 里含有构建目录的绝对路径（上游构建的产物，非链接）。它们不影响运行，也不影响 store 哈希；但 `.modules.yaml` 的存在意味着不应把部署目录当成可继续 `pnpm install` 的工作区。
+- 上游新增 `@file:` 形式的 workspace 设置条目时需要继续跟进（构建会以明确的 pnpm 报错暴露）。
+
+## 5. 风险与未决点（原始判断，附结论）
+
+1. **`pnpm deploy` 与新增 lock importer 的兼容性** —— 已验证：pnpm 会逐条比对 specifier 与 manifest，并额外比对 lockfile `settings` 与 workspace 配置；两边都按同一来源生成即可通过 `--frozen-lockfile`。
+2. **改写上游 workspace 配置的边界（决定 A2 的代价）** —— 已按此执行：只做两类具名改写，各有回归断言，构建日志会打印改写了什么；不允许静默吞掉配置错误。
+3. **node-pty helper 的可执行位** —— 已由步骤 3 的 PTY 检查真实覆盖；顺带修正为在部署树内调用上游脚本，否则它 chmod 的是构建树里的副本。
+4. **新增：构建沙箱里 pnpm 在 Node 24 上崩溃**（见 §1.2 阻塞 4）—— 已用 `pnpmNode = nodejs_22` 规避；`runtimeNode` 仍为 Node 24。若将来 Node 24 修好该问题，可去掉这个拆分。

@@ -2,38 +2,58 @@
 
 从固定源码构建 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，提供 CLI、Web、overlay 和 Home Manager 模块。
 
-当前重构目标为 `0.1.5-rc.1` / `aarch64-darwin`。新方案的完整构建与运行验证进行中；旧 `result` 不代表当前代码已经通过。
-
 ```sh
 nix build .#dsh
 ./result/bin/dsh --version
 ./result/bin/dsh web --no-open
 ```
 
+## 当前状态
+
+- 已验证版本：`0.1.5-rc.1`（`dsh-src` 锁定 `183f08e9`）。
+- 已验证平台：`aarch64-darwin`。其他架构保留 flake 属性，但没有构建和运行验证，因此不声明支持。
+- `dsh-nightly`（`0.1.6-alpha.1`）有元数据、可求值，但本轮没有做运行验收。
+- 没有二进制缓存。
+
 ## 构建方式
 
-1. `nix/metadata/<lock-key>/` 保存上游 lockfile、workspace 配置的 JSON 和原文件 SHA-256。
-2. Nix 按 lockfile 中每个 tarball 的 integrity 下载适用平台的依赖。
-3. `prepare-runtime.py` 在源码副本中将 tarball URL 改为 Nix store 本地文件，并生成 Nix 专用 runtime manifest。必需的 workspace peer 在安装前显式声明。
-4. 固定版本的 Node 和 pnpm 离线生成依赖 store，离线安装并执行上游 `pnpm run build`。
-5. pnpm 部署 production 依赖。安装后只校验闭包，不复制缺失包；node-pty 的 helper 权限由上游脚本恢复。
+1. `nix/metadata/<lock-key>/` 保存上游 `pnpm-lock.yaml`、`pnpm-workspace.yaml` 的 JSON 形式，以及两个原文件的 SHA-256 和版本号。**这些文件已提交进 git**：`nix build` 只把已跟踪文件复制进 store，元数据不入库就无法干净构建。
+2. Nix 按 lockfile 中每个 tarball 的 integrity 逐包下载本平台适用的依赖，没有任何占位哈希。
+3. `prepare-runtime.py` 在源码副本中把 tarball 指向本地文件、生成 Nix 专用运行时 manifest 与其 lockfile importer，并对上游 workspace 配置做两处具名的窄改写（见下）。
+4. 固定版本的 pnpm 与 Node 在离线状态下生成依赖 store、离线安装并执行上游 `pnpm run build`。
+5. `pnpm deploy --prod --node-linker=hoisted` 组装自包含运行时；`verify-runtime.mjs` 只校验、不补齐——缺依赖就构建失败。
 
-逐包获取的设计参考 [Moraxyc 的 importPnpmLock](https://github.com/Moraxyc/deepseek-harness.nix/blob/main/pkgs/importPnpmLock/package.nix)。本仓库实现限定为 integrity 固定的 tarball；遇到 Git 或其他无法验证的依赖会明确失败。没有总 store 哈希登记步骤。
+`pnpm` 运行在 Node 22 上，而安装出来的 `dsh` 运行在 Node 24 上（`runtimeNode`）。这是刻意的：在构建沙箱里用 Node 24 跑 `pnpm install` 会在安装结束时以 `Assertion failed: (errno == EINTR), function uv__io_poll, file kqueue.c` 中止，Node 22 同样的安装不会。`pnpmNode` 可覆盖这一项。
 
-运行时使用 `apps/nix-runtime` 专用 manifest，不依赖 Python SDK bootstrap。CLI 和内置 bundle 由同一次 pnpm deploy 组装，以保留正确的版本解析和共享依赖关系。
+逐包获取的设计参考 [Moraxyc 的 importPnpmLock](https://github.com/Moraxyc/deepseek-harness.nix/blob/main/pkgs/importPnpmLock/package.nix)，并限定为 integrity 固定的 tarball：遇到 Git 或其他无法校验的依赖会明确失败。
+
+### 为什么改写上游 workspace 配置
+
+上游 `package.json` 钉的是 `pnpm@11.7.0`，本仓库钉 `11.25.0`。11.25 对 `pnpm-workspace.yaml` 的校验更严，因此 `prepare-runtime.py` 会精确改写两类记录（各有回归测试）：
+
+| 改写 | 原因 |
+|---|---|
+| 删除 `minimumReleaseAgeExclude` 中指向 workspace 链接的 `@file:` 条目 | 该设置只对 registry 包的发布时间有意义；11.25 会以 `ERR_PNPM_INVALID_VERSION_UNION` 直接失败 |
+| 把 `allowBuilds` 的 `@file:` 键归一到裸包名 | 同上，保留原有的 true/false 决定 |
+
+此外还会：删除 `packageManager`（改由 Nix 固定 pnpm）、加上 `injectWorkspacePackages`（`pnpm deploy` 必需，pnpm 只从该文件读取）、去掉 `subprocess-local` 的源码侧 postinstall（其操作改为部署后对运行时副本执行）。
 
 ## 更新源码和依赖元数据
 
 ```sh
-# 修改 flake.nix 中 dsh-src 的 tag，然后更新锁定 revision。
+# 1. 修改 flake.nix 中 dsh-src 的 tag，然后更新锁定 revision。
 nix flake update dsh-src
 
-# SOURCE 是对应 revision 的干净源码目录。
-nix run .#update-metadata -- /path/to/SOURCE
+# 2. 从 flake 锁定的源生成元数据（必须是锁定源，不是任意工作树）。
+nix build --no-link --print-out-paths --impure --expr \
+  '(builtins.getFlake (toString ./.)).inputs.dsh-src'
+nix run .#update-metadata -- <上面输出的 store 路径>
+
+# 3. 提交 nix/metadata 的改动，再构建。
 nix build .#dsh
 ```
 
-元数据必须与源码中的 `pnpm-lock.yaml` 和 `pnpm-workspace.yaml` 一致；不一致会在求值时失败。`dsh-nightly` 保留为单独输出，也需要为其固定源码生成元数据。
+元数据的 `source.json` 记录格式版本和 lock/workspace 的 SHA-256；与源码不一致或格式过旧都会在求值阶段明确失败。`dsh-nightly` 用同样的步骤，源换成 `inputs.dsh-nightly-src`。
 
 覆盖源码时可以同时提供元数据目录：
 
@@ -44,7 +64,7 @@ dsh.override {
 }
 ```
 
-`lib.<system>.mkDsh` 和 `mkDshFromPath` 保留。任意 revision 不保证兼容当前补丁和构建流程；升级后需重新验收。`runtimeNode`、`pnpmPackage` 可显式覆盖工具链，参数名避免与 `callPackage` 自动注入的 nixpkgs 属性冲突。
+`lib.<system>.mkDsh` 和 `mkDshFromPath` 保留。任意 revision 不保证兼容当前补丁和构建流程；源码与元数据不匹配时会报错，而不是产出不可用的构建。`runtimeNode`、`pnpmPackage` 可显式覆盖工具链。
 
 ## Home Manager
 
@@ -63,13 +83,18 @@ dsh.override {
 
 ## 验证
 
-构建包含 CLI version/help 检查，以及运行时必需依赖和链接检查。完整运行检查使用临时 HOME / DSH_HOME，不需要 API key：
+构建的 `installCheckPhase` 只检查 CLI 的 `--version` / `--help`。完整运行检查在构建沙箱之外执行，需要临时 `HOME`/`DSH_HOME`，不需要 API key：
 
 ```sh
+nix build .#dsh
 python3 nix/smoke-test.py ./result \
   --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
-检查 CLI、实际 PTY 启动、Web 首页、manifest 和页面引用的静态资源。Web 检查在构建沙箱之外运行，因为它需要绑定本机回环端口。
+`smoke-test.py` 检查三件事：
 
-首轮只声明 `aarch64-darwin` 支持。其他架构仍保留 flake 属性，但需相应平台验证后才启用；没有配置二进制缓存。
+1. CLI：`--version` 等于构建版本，`--help` 正常退出。
+2. PTY：用运行时自己的 `node-pty` 真实创建终端并执行命令、读到输出。
+3. Web：临时目录下启动 `dsh web --no-open`，跟随 CLI 打印的带 token URL（换取会话 cookie）抓取首页，再抓取页面实际引用的每个 `/assets/*` 与 `manifest.webmanifest`。
+
+`verify-runtime.mjs` 在构建内运行，沿运行时实际可达的依赖图检查必需依赖能否解析、链接是否逃逸出运行时，以及 `lib/bin.js` 与前端 `dist/index.html` 是否存在。它只报错，不修复；依赖缺失必须回到 manifest 解决。
