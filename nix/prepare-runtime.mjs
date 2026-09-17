@@ -95,26 +95,24 @@ async function ignoreUnusedOptionalBinaries() {
 }
 
 /**
- * Mirror the ignore list into pnpm-lock.yaml's `settings` block.
+ * Mirror the ignore list into pnpm-lock.yaml.
  *
- * pnpm records `ignoredOptionalDependencies` in the lockfile and refuses a
- * frozen install when the current configuration differs, so the lockfile has to
- * carry the same list. It is inserted as text — no resolution happens — and the
- * names are sorted to match pnpm's own normalisation.
+ * pnpm records `ignoredOptionalDependencies` as a top-level key in the lockfile
+ * and refuses a frozen install when the current configuration differs, so the
+ * lockfile has to carry the same list (this is what `pnpm install
+ * --lockfile-only` writes). Inserted as text — no resolution happens — and
+ * sorted to match pnpm's own normalisation.
  */
 async function syncLockfileIgnoredOptionals() {
   const path = join(root, 'pnpm-lock.yaml')
   const lockfile = await readFile(path, 'utf8')
-  if (/^\s+ignoredOptionalDependencies:/m.test(lockfile)) return
-  const lines = lockfile.split('\n')
-  const settingsIndex = lines.findIndex(line => line === 'settings:')
-  if (settingsIndex < 0) throw new Error('prepare-runtime: pnpm-lock.yaml has no settings block')
+  if (/^ignoredOptionalDependencies:/m.test(lockfile)) return
   const block = [
-    '  ignoredOptionalDependencies:',
-    ...[...IGNORED_OPTIONAL_DEPENDENCIES].sort().map(name => `    - '${name}'`),
-  ]
-  lines.splice(settingsIndex + 1, 0, ...block)
-  await writeFile(path, lines.join('\n'))
+    'ignoredOptionalDependencies:',
+    ...[...IGNORED_OPTIONAL_DEPENDENCIES].sort().map(name => `  - '${name}'`),
+    '',
+  ].join('\n')
+  await writeFile(path, `${lockfile.endsWith('\n') ? lockfile : `${lockfile}\n`}${block}`)
   console.log('prepare-runtime: recorded ignoredOptionalDependencies in the lockfile')
 }
 
