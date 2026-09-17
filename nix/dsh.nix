@@ -2,22 +2,27 @@
  * Build DeepSeek Harness (`dsh`) from a source tree of
  * github.com/deepseek-ai/deepseek-harness.
  *
- * Build-time network access is confined to one fixed-output fetch
- * (`nix/pnpm-deps.nix`); everything else runs offline:
+ * The toolchain comes from this flake alone — nixpkgs' `nodejs_24` and
+ * `pnpm_11` — and network access is confined to one fixed-output fetch:
  *
- *   1. `pnpm install --offline --frozen-lockfile` from that store, with the
- *      repository's `packageManager` pin dropped so the pnpm this packaging
- *      provides is the one that runs.
+ *   1. `pnpm install --offline --frozen-lockfile` from that store, run by
+ *      nixpkgs' `pnpmConfigHook` after `prepare-runtime.mjs --stage fetch`
+ *      normalises the workspace for this pnpm release.
  *   2. `pnpm run build` — native `flock` addon, host + client TypeScript,
- *      tsdown bundles, and the Vite web frontend. This needs the *linked*
- *      workspace layout, because the build imports workspace `src/` subpaths.
- *   3. `pnpm --filter dsh-python-runtime-closure deploy --prod` with
- *      `injectWorkspacePackages` enabled: workspace packages become
- *      self-contained copies (~200 MiB) instead of links back into the source
- *      tree. `deploy-carrier.mjs` then completes the closure, materializes the
- *      links that leave the tree, restores native helper permissions, and
- *      asserts the result is relocatable.
+ *      tsdown bundles, and the Vite web frontend. The build needs the *linked*
+ *      workspace layout, because it imports workspace `src/` subpaths.
+ *   3. `prepare-runtime.mjs --stage deploy` and then
+ *      `pnpm --filter dsh-python-runtime-closure deploy --prod`: with
+ *      `injectWorkspacePackages` the workspace packages become self-contained
+ *      copies (~200 MiB) instead of links back into the source tree.
+ *      `deploy-carrier.mjs` completes and verifies the result.
  *   4. Wrap `node --expose-internals <tree>/runtime-bootstrap.mjs` as `dsh`.
+ *
+ * Why pnpm >= 11.22.0 and not the release the repository pins: `pnpm deploy`
+ * only injects workspace dependencies from 11.22.0 on (pnpm/pnpm#13754). On
+ * 11.7.0 it silently falls back to the legacy deploy, which disables lockfile
+ * use and therefore needs registry access — impossible in a pure build. The
+ * `packageManager` pin is dropped in the build directory instead of honoured.
  *
  * Dependency hashes live in `hashes.json`, keyed by the sha256 of the source's
  * `pnpm-lock.yaml`, so several pinned revisions can coexist. A revision whose
@@ -27,7 +32,6 @@
 {
   lib,
   stdenv,
-  callPackage,
   fetchPnpmDeps,
   pnpmConfigHook,
   makeWrapper,
@@ -50,12 +54,7 @@
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
   nodejs ? nodejs_24,
-  # pnpm for install/build; defaults to the release the repository pins in
-  # `packageManager` (see the `let` block). pnpm 11.25 (nixpkgs' `pnpm_11`) is
-  # used for the deploy, which needs >= 11.22.0 to inject workspace packages.
-  pnpm ? null,
-  # pnpm for the deploy step (>= 11.22.0, see nix/pnpm-deps.nix).
-  deployPnpm ? pnpm_11,
+  pnpm ? pnpm_11,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
@@ -81,50 +80,6 @@ let
       lib.fakeHash;
 
   missingHash = pnpmDepsHash == null && !(registered ? ${stdenv.hostPlatform.system});
-
-  pnpmHashes = builtins.fromJSON (builtins.readFile ./pnpm-hashes.json);
-  pnpmVersion =
-    let
-      declared = (builtins.fromJSON (builtins.readFile "${src}/package.json")).packageManager or "";
-    in
-    if lib.hasPrefix "pnpm@" declared then lib.removePrefix "pnpm@" declared else "11.7.0";
-  pnpmHash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
-
-  resolvedPnpm =
-    if pnpm != null then
-      pnpm
-    else
-      callPackage ./pnpm.nix {
-        version = pnpmVersion;
-        hash = pnpmHash;
-      };
-
-  # nixpkgs' fetcher handles the reproducibility work (reproducible tarball,
-  # sorted JSON, `pnpm-fixup-state-db`). It is extended with pnpm's registry
-  # metadata cache — the build's offline install and the injected deploy both
-  # read packuments — and with one resolve-only pass using the deploy's pnpm,
-  # so the cache covers exactly what the deploy's resolution asks for.
-  pnpmDeps = fetchPnpmDeps {
-    pname = "dsh";
-    inherit version src;
-    pnpm = resolvedPnpm;
-    fetcherVersion = 3;
-    hash = resolvedHash;
-    prePnpmInstall = ''
-      pnpm config set cache-dir "$storePath/pnpm-cache"
-      # Also fetch every tarball the lockfile lists, with the pnpm that runs the
-      # deploy: injected copies can pull packages the plain workspace install
-      # never needed. `pnpm fetch` is lockfile-driven, so it does not re-resolve
-      # (and does not trip the `allowBuilds` validation pnpm 11.2x applies while
-      # resolving, which is why the deploy's pnpm must not run a real install
-      # during the fetch).
-      ${lib.getExe deployPnpm} fetch \
-        --store-dir "$storePath" \
-        --cache-dir "$storePath/pnpm-cache" \
-        --config.manage-package-manager-versions=false \
-        --config.minimum-release-age=0 || true
-    '';
-  };
 in
 lib.warnIf missingHash ''
   dsh: no pnpm dependency hash registered for ${version} (lockfile key ${lockKey})
@@ -134,15 +89,31 @@ lib.warnIf missingHash ''
   stdenv.mkDerivation (finalAttrs: {
     pname = "dsh";
     inherit version src;
-    inherit pnpmDeps;
+
+    pnpmDeps = fetchPnpmDeps {
+      pname = "dsh";
+      inherit version src pnpm;
+      fetcherVersion = 3;
+      hash = resolvedHash;
+      # nixpkgs' fetcher does the reproducibility work (reproducible tarball,
+      # sorted JSON, `pnpm-fixup-state-db`). Two additions here:
+      #   * keep pnpm's registry metadata cache next to the store, because the
+      #     build has no network and both the install and the deploy's
+      #     resolution read packuments;
+      #   * normalise the workspace before the fetcher's install runs.
+      prePnpmInstall = ''
+        pnpm config set cache-dir "$storePath/pnpm-cache"
+        ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
+      '';
+    };
 
     nativeBuildInputs = [
       nodejs
-      resolvedPnpm
+      pnpm
       makeWrapper
       writableTmpDirAsHomeHook
-      # Unpacks `pnpmDeps` (it brings zstd) and runs the offline install in
-      # `postConfigure`.
+      # Unpacks `pnpmDeps` (it brings zstd and a writable $HOME) and runs the
+      # offline install in `postConfigure`.
       pnpmConfigHook
     ] ++ extraNativeBuildInputs;
 
@@ -159,10 +130,18 @@ lib.warnIf missingHash ''
       # 4 GiB heap for the aggregate TypeScript programs (matches `build:lib:host`).
       NODE_OPTIONS = "--max-old-space-size=4096";
       # Flags for the install that `pnpmConfigHook` runs: trust the frozen
-      # lockfile, do not let pnpm fetch a different package manager, and do not
-      # apply the release-age policy (the fetch above is the trust boundary).
-      pnpmInstallFlags = "--config.trustLockfile=true --config.manage-package-manager-versions=false --config.minimum-release-age=0";
+      # lockfile instead of re-verifying it against the registry-backed
+      # supply-chain policy (the fetch above is the trust boundary).
+      pnpmInstallFlags = "--config.trustLockfile=true";
     };
+
+    configurePhase = ''
+      runHook preConfigure
+      # The build directory is a fresh copy of the source, so apply the same
+      # normalisation the fetch applied before installing.
+      ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
+      runHook postConfigure
+    '';
 
     buildPhase = ''
       runHook preBuild
@@ -181,19 +160,16 @@ lib.warnIf missingHash ''
       # `pnpmConfigHook` exported STORE_PATH while unpacking the fetched store.
       : "$STORE_PATH"
 
-
-      # Switch to injected workspace packages for the deploy only (see the
-      # header): the build above needed the linked layout.
+      # Switch to injected workspace packages for the deploy only (see above):
+      # the build needed the linked layout.
       ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage deploy --root "$PWD"
 
-      PNPM_CONFIG_OFFLINE=true ${lib.getExe deployPnpm} --filter dsh-python-runtime-closure deploy \
+      PNPM_CONFIG_OFFLINE=true pnpm --filter dsh-python-runtime-closure deploy \
         --prod \
         --store-dir "$STORE_PATH" \
         --cache-dir "$STORE_PATH/pnpm-cache" \
         --config.node-linker=hoisted \
         --config.link-workspace-packages=true \
-        --config.manage-package-manager-versions=false \
-        --config.minimum-release-age=0 \
         $out/lib/dsh
 
       # Complete and verify the tree: restore peers the deploy manifest omits,
@@ -231,10 +207,7 @@ lib.warnIf missingHash ''
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
-      pnpm = resolvedPnpm;
-      inherit deployPnpm pnpmVersion;
-      # Version switching: `pkgs.dsh.override { src = ...; }`.
-      inherit hashesFile;
+      inherit pnpm hashesFile;
     };
   })
 )

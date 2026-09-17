@@ -185,8 +185,7 @@ hash 是**按平台**的（pnpm 只为当前平台拉 optional 依赖），所�
 | `flake.nix` | 输入（nixpkgs / release 源码 / nightly 源码）与输出（packages、overlay、HM 模块、devShell、`.#update-hashes`） |
 | `nix/dsh.nix` | 真正的 derivation：离线安装 → 构建 → 组装并校验运行时树 → wrapper |
 | `nix/deploy-carrier.mjs` | 校验/修补运行时树：补全缺失依赖与 peer、实体化指向树外的链接、清理悬空链接、恢复 native helper 可执行位 |
-| `nix/pnpm-deps.nix` | 固定输出抓取：pnpm store + 元数据缓存（离线构建的前提） |
-| `nix/prepare-runtime.mjs` | 构建期小改动：去掉 `packageManager` 钉、为 deploy 开启 injection、删掉触发策略的 postinstall |
+| `nix/prepare-runtime.mjs` | 构建期规范化：去掉 `packageManager` 钉与 `@file:` 形式的 `allowBuilds`、为 deploy 开启 injection、删掉触发策略的 postinstall |
 | `nix/hashes.json` | 依赖闭包 hash 注册表（按 lockfile 的 sha256 索引） |
 | `nix/update-hashes.sh` | hash 登记脚本（`nix run .#update-hashes`） |
 | `nix/home-manager.nix` | `programs.dsh.*` 模块 |
