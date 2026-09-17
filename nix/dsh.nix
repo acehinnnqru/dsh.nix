@@ -80,6 +80,13 @@ let
       lib.fakeHash;
 
   missingHash = pnpmDepsHash == null && !(registered ? ${stdenv.hostPlatform.system});
+
+  # Only this host's optional dependencies are fetched and installed: the
+  # workspace pulls per-platform binaries (e.g. @openai/codex-<os>-<arch>,
+  # 275 MB each) that the harness does not ship, and nixpkgs' fetcher would
+  # otherwise download all of them (~1.4 GB) for a platform-complete store.
+  npmArch = stdenv.hostPlatform.node.arch;
+  npmPlatform = stdenv.hostPlatform.node.platform;
 in
 lib.warnIf missingHash ''
   dsh: no pnpm dependency hash registered for ${version} (lockfile key ${lockKey})
@@ -140,6 +147,10 @@ lib.warnIf missingHash ''
       # The build directory is a fresh copy of the source, so apply the same
       # normalisation the fetch applied before installing.
       ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
+      # Same platform restriction as the fetch, so the frozen install only asks
+      # for what the store actually holds.
+      pnpm config set supported-architectures.os ${npmPlatform}
+      pnpm config set supported-architectures.cpu ${npmArch}
       runHook postConfigure
     '';
 
