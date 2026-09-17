@@ -94,6 +94,30 @@ async function ignoreUnusedOptionalBinaries() {
   console.log(`prepare-runtime: ignoring ${String(IGNORED_OPTIONAL_DEPENDENCIES.length)} unused optional binaries`)
 }
 
+/**
+ * Mirror the ignore list into pnpm-lock.yaml's `settings` block.
+ *
+ * pnpm records `ignoredOptionalDependencies` in the lockfile and refuses a
+ * frozen install when the current configuration differs, so the lockfile has to
+ * carry the same list. It is inserted as text — no resolution happens — and the
+ * names are sorted to match pnpm's own normalisation.
+ */
+async function syncLockfileIgnoredOptionals() {
+  const path = join(root, 'pnpm-lock.yaml')
+  const lockfile = await readFile(path, 'utf8')
+  if (/^\s+ignoredOptionalDependencies:/m.test(lockfile)) return
+  const lines = lockfile.split('\n')
+  const settingsIndex = lines.findIndex(line => line === 'settings:')
+  if (settingsIndex < 0) throw new Error('prepare-runtime: pnpm-lock.yaml has no settings block')
+  const block = [
+    '  ignoredOptionalDependencies:',
+    ...[...IGNORED_OPTIONAL_DEPENDENCIES].sort().map(name => `    - '${name}'`),
+  ]
+  lines.splice(settingsIndex + 1, 0, ...block)
+  await writeFile(path, lines.join('\n'))
+  console.log('prepare-runtime: recorded ignoredOptionalDependencies in the lockfile')
+}
+
 /** Ask pnpm to inject workspace packages into the deployed closure. */
 async function enableWorkspaceInjection() {
   const path = join(root, 'pnpm-workspace.yaml')
@@ -120,6 +144,7 @@ async function dropSpawnHelperPostinstall() {
 await dropPackageManagerPin()
 await dropFileSpecAllowBuilds()
 await ignoreUnusedOptionalBinaries()
+await syncLockfileIgnoredOptionals()
 if (values.stage === 'deploy') {
   await enableWorkspaceInjection()
   await dropSpawnHelperPostinstall()
