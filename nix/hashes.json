@@ -10,9 +10,7 @@
     }
   },
   "a6515566578a26c2": {
-    "hashes": {
-      "aarch64-darwin": "sha256-P7Dtm6qInTTXoDHcx4V2CfTlVK/0Rjl0omm3W3nQXqE="
-    },
+    "hashes": {},
     "version": "0.1.5-rc.1"
   }
 }

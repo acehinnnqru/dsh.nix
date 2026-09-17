@@ -48,9 +48,15 @@
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
   nodejs ? nodejs_24,
-  # `pnpm deploy` injects workspace dependencies only from 11.22.0 on, so the
-  # deploy step cannot use the release the repository pins in `packageManager`.
-  pnpm ? pnpm_11,
+  # pnpm for install/build: the release the repository pins in
+  # `packageManager`. pnpm 11.25 (nixpkgs' `pnpm_11`) is used for the deploy,
+  # which needs >= 11.22.0 to inject workspace packages.
+  pnpm ? callPackage ./pnpm.nix {
+    version = pnpmVersion;
+    hash = pnpmHash;
+  },
+  # pnpm for the deploy step (>= 11.22.0, see nix/pnpm-deps.nix).
+  deployPnpm ? pnpm_11,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
@@ -77,8 +83,16 @@ let
 
   missingHash = pnpmDepsHash == null && !(registered ? ${stdenv.hostPlatform.system});
 
+  pnpmHashes = builtins.fromJSON (builtins.readFile ./pnpm-hashes.json);
+  pnpmVersion =
+    let
+      declared = (builtins.fromJSON (builtins.readFile "${src}/package.json")).packageManager or "";
+    in
+    if lib.hasPrefix "pnpm@" declared then lib.removePrefix "pnpm@" declared else "11.7.0";
+  pnpmHash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
+
   pnpmDeps = callPackage ./pnpm-deps.nix {
-    inherit src version pnpm nodejs;
+    inherit src version pnpm nodejs deployPnpm;
     hash = resolvedHash;
   };
 in
@@ -124,8 +138,6 @@ lib.warnIf missingHash ''
       cp -a ${finalAttrs.pnpmDeps}/cache "$CACHE_PATH"
       chmod -R u+w "$STORE_PATH" "$CACHE_PATH"
 
-      ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
-
       echo "Installing dependencies"
       pnpm install \
         --offline \
@@ -160,7 +172,7 @@ lib.warnIf missingHash ''
       # header): the build above needed the linked layout.
       ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage deploy --root "$PWD"
 
-      PNPM_CONFIG_OFFLINE=true pnpm --filter dsh-python-runtime-closure deploy \
+      PNPM_CONFIG_OFFLINE=true ${lib.getExe deployPnpm} --filter dsh-python-runtime-closure deploy \
         --prod \
         --store-dir "$STORE_PATH" \
         --cache-dir "$CACHE_PATH" \
@@ -205,7 +217,7 @@ lib.warnIf missingHash ''
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
-      inherit pnpm;
+      inherit pnpm deployPnpm pnpmVersion;
       # Version switching: `pkgs.dsh.override { src = ...; }`.
       inherit hashesFile;
     };

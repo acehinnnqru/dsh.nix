@@ -5,7 +5,8 @@
  *   --stage fetch  drop the `packageManager` pin, so the pnpm that runs is the
  *                  one this packaging provides (the repository pins 11.7.0,
  *                  which cannot inject workspace packages for `pnpm deploy`)
- *   --stage deploy enable `injectWorkspacePackages` in pnpm-workspace.yaml and
+ *   --stage deploy drop the pin (once more, for the deploy's pnpm), enable
+ *                  `injectWorkspacePackages` in pnpm-workspace.yaml and
  *                  remove the one postinstall script that pnpm's
  *                  `strictDepBuilds` policy rejects once workspace packages are
  *                  injected (its effect is restored afterwards by
@@ -59,6 +60,7 @@ async function dropSpawnHelperPostinstall() {
 if (values.stage === 'fetch') {
   await dropPackageManagerPin()
 } else if (values.stage === 'deploy') {
+  await dropPackageManagerPin()
   await enableWorkspaceInjection()
   await dropSpawnHelperPostinstall()
 } else {

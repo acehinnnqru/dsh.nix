@@ -19,6 +19,9 @@
   stdenvNoCC,
   nodejs,
   pnpm,
+  # The pnpm that runs the deploy (>= 11.22.0); used here only to warm the
+  # metadata cache that the deploy's resolution reads.
+  deployPnpm,
   cacert,
   src,
   version,
@@ -60,10 +63,6 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     export HOME=$TMPDIR/home
     mkdir -p "$HOME" $out/store $out/cache
 
-    # Drop the `packageManager` pin so pnpm does not fetch and run the older
-    # release this repository declares (the deploy step needs >= 11.22.0).
-    ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
-
     pnpm install \
       --ignore-scripts \
       --frozen-lockfile \
@@ -75,6 +74,17 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     # Warm the metadata cache with one resolve-only pass: the build's offline
     # install and the deploy both look up packuments, and neither can fetch.
     pnpm install \
+      --lockfile-only \
+      --force \
+      --ignore-scripts \
+      --store-dir $out/store \
+      --cache-dir $out/cache \
+      --config.manage-package-manager-versions=false \
+      --config.minimum-release-age=0
+
+    # Warm the metadata cache for the deploy's pnpm as well: it resolves the
+    # closure's specs through the same cache, and the build has no network.
+    ${lib.getExe deployPnpm} install \
       --lockfile-only \
       --force \
       --ignore-scripts \
