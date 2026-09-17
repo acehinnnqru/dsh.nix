@@ -48,13 +48,10 @@
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
   nodejs ? nodejs_24,
-  # pnpm for install/build: the release the repository pins in
-  # `packageManager`. pnpm 11.25 (nixpkgs' `pnpm_11`) is used for the deploy,
-  # which needs >= 11.22.0 to inject workspace packages.
-  pnpm ? callPackage ./pnpm.nix {
-    version = pnpmVersion;
-    hash = pnpmHash;
-  },
+  # pnpm for install/build; defaults to the release the repository pins in
+  # `packageManager` (see the `let` block). pnpm 11.25 (nixpkgs' `pnpm_11`) is
+  # used for the deploy, which needs >= 11.22.0 to inject workspace packages.
+  pnpm ? null,
   # pnpm for the deploy step (>= 11.22.0, see nix/pnpm-deps.nix).
   deployPnpm ? pnpm_11,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
@@ -91,8 +88,18 @@ let
     if lib.hasPrefix "pnpm@" declared then lib.removePrefix "pnpm@" declared else "11.7.0";
   pnpmHash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
 
+  resolvedPnpm =
+    if pnpm != null then
+      pnpm
+    else
+      callPackage ./pnpm.nix {
+        version = pnpmVersion;
+        hash = pnpmHash;
+      };
+
   pnpmDeps = callPackage ./pnpm-deps.nix {
-    inherit src version pnpm nodejs deployPnpm;
+    inherit src version nodejs deployPnpm;
+    pnpm = resolvedPnpm;
     hash = resolvedHash;
   };
 in
@@ -108,7 +115,7 @@ lib.warnIf missingHash ''
 
     nativeBuildInputs = [
       nodejs
-      pnpm
+      resolvedPnpm
       makeWrapper
       writableTmpDirAsHomeHook
     ] ++ extraNativeBuildInputs;
@@ -217,7 +224,8 @@ lib.warnIf missingHash ''
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
-      inherit pnpm deployPnpm pnpmVersion;
+      pnpm = resolvedPnpm;
+      inherit deployPnpm pnpmVersion;
       # Version switching: `pkgs.dsh.override { src = ...; }`.
       inherit hashesFile;
     };
