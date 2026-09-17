@@ -1,6 +1,7 @@
 # dsh.nix
 
-从固定源码构建 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，提供 CLI、Web、overlay 和 Home Manager 模块。
+Builds [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) from pinned sources, and
+provides the CLI, Web, an overlay and a Home Manager module.
 
 ```sh
 nix build .#dsh
@@ -8,57 +9,82 @@ nix build .#dsh
 ./result/bin/dsh web --no-open
 ```
 
-## 当前状态
+## Current status
 
-- 已验证版本：`0.1.5-rc.1`（`dsh-src` 锁定 `183f08e9`）。
-- 已验证平台：`aarch64-darwin`。其他架构保留 flake 属性，但没有构建和运行验证，因此不声明支持。
-- `dsh-nightly`（`0.1.6-alpha.1`）有元数据、可求值，但本轮没有做运行验收。
-- 没有二进制缓存。
+- Verified version: `0.1.5-rc.1` (`dsh-src` pinned at `183f08e9`).
+- Verified platform: `aarch64-darwin`. Other architectures keep the flake attributes, but there is
+  no build or runtime verification for them, so they are not claimed as supported.
+- `dsh-nightly` (`0.1.6-alpha.1`) has metadata and evaluates, but no runtime acceptance was done
+  for it this round.
+- No binary cache.
 
-## 构建方式
+## How it builds
 
-1. `nix/metadata/<lock-key>/` 保存上游 `pnpm-lock.yaml`、`pnpm-workspace.yaml` 的 JSON 形式，以及两个原文件的 SHA-256 和版本号。**这些文件已提交进 git**：`nix build` 只把已跟踪文件复制进 store，元数据不入库就无法干净构建。
-2. Nix 按 lockfile 中每个 tarball 的 integrity 逐包下载本平台适用的依赖，没有任何占位哈希。
-3. `prepare-runtime.py` 在源码副本中把 tarball 指向本地文件、生成 Nix 专用运行时 manifest 与其 lockfile importer，并对上游 workspace 配置做两处具名的窄改写（见下）。
-4. 固定版本的 pnpm 与 Node 在离线状态下生成依赖 store、离线安装并执行上游 `pnpm run build`。
-5. `pnpm deploy --prod --node-linker=hoisted` 组装自包含运行时；`verify-runtime.mjs` 只校验、不补齐——缺依赖就构建失败。
+1. `nix/metadata/<lock-key>/` holds the JSON forms of upstream's `pnpm-lock.yaml` and
+   `pnpm-workspace.yaml`, plus the SHA-256 of both originals and the version. **These files are
+   committed to git**: `nix build` copies only tracked files into the store, so without the
+   metadata in the repository a clean build is impossible.
+2. Nix downloads this platform's dependencies package by package, using each tarball's integrity
+   from the lockfile. There are no placeholder hashes anywhere.
+3. `prepare-runtime.py` points the tarballs at local files inside the source copy, generates the
+   Nix-specific runtime manifest and its lockfile importer, and applies two named, narrow rewrites
+   to the upstream workspace configuration (see below).
+4. The pinned pnpm and Node generate the dependency store offline, install offline, and run
+   upstream's `pnpm run build`.
+5. `pnpm deploy --prod --node-linker=hoisted` assembles a self-contained runtime;
+   `verify-runtime.mjs` only verifies and never fills gaps — a missing dependency fails the build.
 
-`pnpm` 运行在 Node 22 上，而安装出来的 `dsh` 运行在 Node 24 上（`runtimeNode`）。这是刻意的：在构建沙箱里用 Node 24 跑 `pnpm install` 会在安装结束时以 `Assertion failed: (errno == EINTR), function uv__io_poll, file kqueue.c` 中止，Node 22 同样的安装不会。`pnpmNode` 可覆盖这一项。
+`pnpm` runs on Node 22 while the installed `dsh` runs on Node 24 (`runtimeNode`). That split is
+deliberate: running `pnpm install` under Node 24 inside the build sandbox aborts at the end of the
+install with `Assertion failed: (errno == EINTR), function uv__io_poll, file kqueue.c`, and the same
+install under Node 22 does not. `pnpmNode` overrides this.
 
-逐包获取的设计参考 [Moraxyc 的 importPnpmLock](https://github.com/Moraxyc/deepseek-harness.nix/blob/main/pkgs/importPnpmLock/package.nix)，并限定为 integrity 固定的 tarball：遇到 Git 或其他无法校验的依赖会明确失败。
+The per-package fetch design follows [Moraxyc's
+importPnpmLock](https://github.com/Moraxyc/deepseek-harness.nix/blob/main/pkgs/importPnpmLock/package.nix),
+restricted to tarballs with pinned integrity: a Git or otherwise unverifiable dependency fails
+loudly.
 
-### 为什么改写上游 workspace 配置
+### Why the upstream workspace configuration is rewritten
 
-上游 `package.json` 钉的是 `pnpm@11.7.0`，本仓库钉 `11.25.0`。11.25 对 `pnpm-workspace.yaml` 的校验更严，因此 `prepare-runtime.py` 会精确改写两类记录（各有回归测试）：
+Upstream's `package.json` pins `pnpm@11.7.0` while this repository pins `11.25.0`. Version 11.25
+validates `pnpm-workspace.yaml` more strictly, so `prepare-runtime.py` rewrites exactly two kinds of
+entry (each with a regression test):
 
-| 改写 | 原因 |
+| Rewrite | Reason |
 |---|---|
-| 删除 `minimumReleaseAgeExclude` 中指向 workspace 链接的 `@file:` 条目 | 该设置只对 registry 包的发布时间有意义；11.25 会以 `ERR_PNPM_INVALID_VERSION_UNION` 直接失败 |
-| 把 `allowBuilds` 的 `@file:` 键归一到裸包名 | 同上，保留原有的 true/false 决定 |
+| Drop the `@file:` entries in `minimumReleaseAgeExclude` that point at workspace links | that setting is only meaningful for registry package release dates; 11.25 fails outright with `ERR_PNPM_INVALID_VERSION_UNION` |
+| Normalise the `@file:` keys in `allowBuilds` to bare package names | same cause, keeping the original true/false decision |
 
-此外还会：删除 `packageManager`（改由 Nix 固定 pnpm）、加上 `injectWorkspacePackages`（`pnpm deploy` 必需，pnpm 只从该文件读取）、去掉 `subprocess-local` 的源码侧 postinstall（其操作改为部署后对运行时副本执行）。
+It also: deletes `packageManager` (Nix pins pnpm instead), adds `injectWorkspacePackages` (required
+by `pnpm deploy`, and pnpm reads it only from that file), and removes the source-side postinstall of
+`subprocess-local` (its work now runs against the runtime copy after deployment).
 
-## 更新源码和依赖元数据
+## Updating the source and dependency metadata
 
 ```sh
-# 1. 修改 flake.nix 中 dsh-src 的 tag，然后更新锁定 revision。
+# 1. Change the dsh-src tag in flake.nix, then update the locked revision.
 nix flake update dsh-src
 
-# 2. 同步依赖元数据：报告 flake 锁定的源、lockKey 与该目录是否最新，
-#    需要时直接重新生成。幂等，可以随时重跑。
-nix/update-metadata-for-input.sh          # 两个输出都检查
-nix/update-metadata-for-input.sh dsh      # 只检查固定版本
+# 2. Sync the dependency metadata: reports the source the flake pins, the lockKey,
+#    and whether that directory is current, regenerating it when needed.
+#    Idempotent, safe to re-run at any time.
+nix/update-metadata-for-input.sh          # check both outputs
+nix/update-metadata-for-input.sh dsh      # check only the pinned release
 
-# 3. 构建并提交：flake.lock 与 nix/metadata 必须在同一次提交里。
+# 3. Build and commit: flake.lock and nix/metadata must land in the same commit.
 nix build .#dsh .#dsh-nightly
 python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
-完整的升级流程、失败症状对照表和注意事项见 **[MAINTAINING.md](./MAINTAINING.md)**。
+The full upgrade flow, the symptom-to-cause table and the caveats are in
+**[MAINTAINING.md](./MAINTAINING.md)**.
 
-元数据的 `source.json` 记录格式版本和 lock/workspace 的 SHA-256；与源码不一致或格式过旧都会在求值阶段明确失败。一个新 tag 不一定改 lock，此时 `lockKey` 不变、无需重新生成，脚本只会提醒记录的版本号需要跟着走。
+A metadata `source.json` records the format version and the SHA-256 of the lock/workspace; a
+mismatch with the source, or a stale format, fails loudly during evaluation. A new tag does not
+necessarily change the lock — in that case the `lockKey` stays put, nothing needs regenerating, and
+the script only points out that the recorded version has to follow.
 
-覆盖源码时可以同时提供元数据目录：
+Overriding the source can supply a metadata directory at the same time:
 
 ```nix
 dsh.override {
@@ -67,7 +93,10 @@ dsh.override {
 }
 ```
 
-`lib.<system>.mkDsh` 和 `mkDshFromPath` 保留。任意 revision 不保证兼容当前补丁和构建流程；源码与元数据不匹配时会报错，而不是产出不可用的构建。`runtimeNode`、`pnpmPackage` 可显式覆盖工具链。
+`lib.<system>.mkDsh` and `mkDshFromPath` are kept. An arbitrary revision is not guaranteed to work
+with the current patches and build flow; a source/metadata mismatch is an error rather than a
+build that produces something unusable. `runtimeNode` and `pnpmPackage` explicitly override the
+toolchain.
 
 ## Home Manager
 
@@ -77,16 +106,18 @@ dsh.override {
   programs.dsh = {
     enable = true;
     # home = "/home/alice/.dsh";
-    # pluginManager = true; # 将 pnpm 放入 PATH，用于插件管理
+    # pluginManager = true; # puts pnpm on PATH for plugin management
   };
 }
 ```
 
-也可以使用 `overlays.default` 提供的 `pkgs.dsh` 和 `pkgs.dsh-nightly`，或直接安装 `packages.<system>.dsh`。
+You can also use the `pkgs.dsh` and `pkgs.dsh-nightly` provided by `overlays.default`, or install
+`packages.<system>.dsh` directly.
 
-## 验证
+## Verification
 
-构建的 `installCheckPhase` 只检查 CLI 的 `--version` / `--help`。完整运行检查在构建沙箱之外执行，需要临时 `HOME`/`DSH_HOME`，不需要 API key：
+The build's `installCheckPhase` only checks the CLI's `--version` / `--help`. The full runtime
+checks run outside the build sandbox and need a temporary `HOME`/`DSH_HOME`, but no API key:
 
 ```sh
 nix build .#dsh
@@ -94,10 +125,16 @@ python3 nix/smoke-test.py ./result \
   --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
-`smoke-test.py` 检查三件事：
+`smoke-test.py` checks three things:
 
-1. CLI：`--version` 等于构建版本，`--help` 正常退出。
-2. PTY：用运行时自己的 `node-pty` 真实创建终端并执行命令、读到输出。
-3. Web：临时目录下启动 `dsh web --no-open`，跟随 CLI 打印的带 token URL（换取会话 cookie）抓取首页，再抓取页面实际引用的每个 `/assets/*` 与 `manifest.webmanifest`。
+1. CLI: `--version` equals the built version and `--help` exits cleanly.
+2. PTY: creates a real terminal with the runtime's own `node-pty`, runs a command and reads its
+   output.
+3. Web: starts `dsh web --no-open` under a temporary directory, follows the token-bearing URL the
+   CLI prints (exchanging it for a session cookie) to fetch the home page, then fetches every
+   `/assets/*` the page actually references plus `manifest.webmanifest`.
 
-`verify-runtime.mjs` 在构建内运行，沿运行时实际可达的依赖图检查必需依赖能否解析、链接是否逃逸出运行时，以及 `lib/bin.js` 与前端 `dist/index.html` 是否存在。它只报错，不修复；依赖缺失必须回到 manifest 解决。
+`verify-runtime.mjs` runs inside the build, walks the dependency graph actually reachable from the
+runtime, and checks that required dependencies resolve, that no link escapes the runtime, and that
+`lib/bin.js` and the frontend `dist/index.html` exist. It only reports errors and never repairs
+them; a missing dependency has to be fixed in the manifest.
