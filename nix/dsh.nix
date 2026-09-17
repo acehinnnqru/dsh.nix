@@ -28,6 +28,8 @@
   lib,
   stdenv,
   callPackage,
+  fetchPnpmDeps,
+  pnpmConfigHook,
   makeWrapper,
   writableTmpDirAsHomeHook,
   nodejs_24,
@@ -97,10 +99,28 @@ let
         hash = pnpmHash;
       };
 
-  pnpmDeps = callPackage ./pnpm-deps.nix {
-    inherit src version nodejs deployPnpm;
+  # nixpkgs' fetcher handles the reproducibility work (reproducible tarball,
+  # sorted JSON, `pnpm-fixup-state-db`). It is extended with pnpm's registry
+  # metadata cache — the build's offline install and the injected deploy both
+  # read packuments — and with one resolve-only pass using the deploy's pnpm,
+  # so the cache covers exactly what the deploy's resolution asks for.
+  pnpmDeps = fetchPnpmDeps {
+    pname = "dsh";
+    inherit version src;
     pnpm = resolvedPnpm;
+    fetcherVersion = 3;
     hash = resolvedHash;
+    prePnpmInstall = ''
+      pnpm config set cache-dir "$storePath/pnpm-cache"
+      ${lib.getExe deployPnpm} install \
+        --lockfile-only \
+        --force \
+        --ignore-scripts \
+        --store-dir "$storePath" \
+        --cache-dir "$storePath/pnpm-cache" \
+        --config.manage-package-manager-versions=false \
+        --config.minimum-release-age=0 || true
+    '';
   };
 in
 lib.warnIf missingHash ''
@@ -118,6 +138,10 @@ lib.warnIf missingHash ''
       resolvedPnpm
       makeWrapper
       writableTmpDirAsHomeHook
+      # Unpacks `pnpmDeps` and runs the offline install in `postConfigure`.
+      pnpmConfigHook
+      # `tar --zstd` unpacks the fetched store.
+      zstd
     ] ++ extraNativeBuildInputs;
 
     env = {
@@ -132,33 +156,11 @@ lib.warnIf missingHash ''
       pnpm_config_verify_deps_before_run = "false";
       # 4 GiB heap for the aggregate TypeScript programs (matches `build:lib:host`).
       NODE_OPTIONS = "--max-old-space-size=4096";
+      # Flags for the install that `pnpmConfigHook` runs: trust the frozen
+      # lockfile, do not let pnpm fetch a different package manager, and do not
+      # apply the release-age policy (the fetch above is the trust boundary).
+      pnpmInstallFlags = "--config.trustLockfile=true --config.manage-package-manager-versions=false --config.minimum-release-age=0";
     };
-
-    configurePhase = ''
-      runHook preConfigure
-
-      # The fetched store and metadata cache are read-only store paths; work on
-      # writable copies so pnpm can update its indices.
-      export STORE_PATH=$TMPDIR/pnpm-store
-      export CACHE_PATH=$TMPDIR/pnpm-cache
-      cp -a ${finalAttrs.pnpmDeps}/store "$STORE_PATH"
-      cp -a ${finalAttrs.pnpmDeps}/cache "$CACHE_PATH"
-      chmod -R u+w "$STORE_PATH" "$CACHE_PATH"
-
-      echo "Installing dependencies"
-      pnpm install \
-        --offline \
-        --ignore-scripts \
-        --frozen-lockfile \
-        --store-dir "$STORE_PATH" \
-        --cache-dir "$CACHE_PATH" \
-        --config.trustLockfile=true \
-        --config.manage-package-manager-versions=false \
-        --config.minimum-release-age=0
-      patchShebangs node_modules/{*,.*}
-
-      runHook postConfigure
-    '';
 
     buildPhase = ''
       runHook preBuild
@@ -174,6 +176,9 @@ lib.warnIf missingHash ''
       runHook preInstall
 
       mkdir -p $out/lib
+      # `pnpmConfigHook` exported STORE_PATH while unpacking the fetched store.
+      : "$STORE_PATH"
+
 
       # Switch to injected workspace packages for the deploy only (see the
       # header): the build above needed the linked layout.
@@ -182,7 +187,7 @@ lib.warnIf missingHash ''
       PNPM_CONFIG_OFFLINE=true ${lib.getExe deployPnpm} --filter dsh-python-runtime-closure deploy \
         --prod \
         --store-dir "$STORE_PATH" \
-        --cache-dir "$CACHE_PATH" \
+        --cache-dir "$STORE_PATH/pnpm-cache" \
         --config.node-linker=hoisted \
         --config.link-workspace-packages=true \
         --config.manage-package-manager-versions=false \

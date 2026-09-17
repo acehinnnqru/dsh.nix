@@ -1,16 +1,14 @@
 #!/usr/bin/env node
 /**
- * Build-time edits the harness build and deploy need, in one place.
+ * Build-time edits the deploy step needs, in one place:
  *
- *   --stage fetch  drop the `packageManager` pin, so the pnpm that runs is the
- *                  one this packaging provides (the repository pins 11.7.0,
- *                  which cannot inject workspace packages for `pnpm deploy`)
- *   --stage deploy drop the pin (once more, for the deploy's pnpm), enable
- *                  `injectWorkspacePackages` in pnpm-workspace.yaml and
- *                  remove the one postinstall script that pnpm's
- *                  `strictDepBuilds` policy rejects once workspace packages are
- *                  injected (its effect is restored afterwards by
- *                  `deploy-carrier.mjs`)
+ *   - drop the `packageManager` pin, so the pnpm that runs the deploy is the one
+ *     this packaging provides (the repository pins 11.7.0, which cannot inject
+ *     workspace packages for `pnpm deploy`);
+ *   - enable `injectWorkspacePackages` in pnpm-workspace.yaml;
+ *   - remove the one postinstall script that pnpm's `strictDepBuilds` policy
+ *     rejects once workspace packages are injected (its effect is restored
+ *     afterwards by `deploy-carrier.mjs`).
  *
  * Only the build directory is touched; the pinned source stays untouched.
  */
@@ -19,12 +17,12 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
 const { values } = parseArgs({ options: { stage: { type: 'string' }, root: { type: 'string' } } })
-if (values.stage === undefined || values.root === undefined) {
-  throw new Error('usage: prepare-runtime.mjs --stage <fetch|deploy> --root <dir>')
+if (values.stage !== 'deploy' || values.root === undefined) {
+  throw new Error('usage: prepare-runtime.mjs --stage deploy --root <dir>')
 }
 const root = values.root
 
-/** Remove the `packageManager` field so our pnpm runs instead of a pinned one. */
+/** Remove the `packageManager` field so our pnpm runs instead of the pinned one. */
 async function dropPackageManagerPin() {
   const path = join(root, 'package.json')
   const manifest = JSON.parse(await readFile(path, 'utf8'))
@@ -57,12 +55,6 @@ async function dropSpawnHelperPostinstall() {
   console.log('prepare-runtime: removed the subprocess-local postinstall script')
 }
 
-if (values.stage === 'fetch') {
-  await dropPackageManagerPin()
-} else if (values.stage === 'deploy') {
-  await dropPackageManagerPin()
-  await enableWorkspaceInjection()
-  await dropSpawnHelperPostinstall()
-} else {
-  throw new Error(`prepare-runtime: unknown stage ${values.stage}`)
-}
+await dropPackageManagerPin()
+await enableWorkspaceInjection()
+await dropSpawnHelperPostinstall()
