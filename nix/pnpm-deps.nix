@@ -39,6 +39,15 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     cacert
   ];
 
+  # `--reporter=append-only` keeps progress in the build log instead of a TUI,
+  # which is what makes a failure here diagnosable.
+  env = {
+    NODE_OPTIONS = "--max-old-space-size=6144";
+    npm_config_reporter = "append-only";
+    npm_config_side_effects_cache = "false";
+    npm_config_update_notifier = "false";
+  };
+
   dontConfigure = true;
   dontBuild = true;
   # The store contains the usual dangling optional-platform links; the fixup
