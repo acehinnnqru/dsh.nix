@@ -8,9 +8,9 @@ nix run github:acehinnnqru/dsh.nix          # 直接跑
 nix profile install github:acehinnnqru/dsh.nix
 ```
 
-已在 `aarch64-darwin` 上验证：`nix build .#dsh` 成功，`result/bin/dsh --version` 输出 `0.1.5-rc.1`，
-`result/bin/dsh web` 能从只读的 store 路径启动并正常提供前端资源（`/manifest.webmanifest` 与
-`apps/web/dist/assets/*.js` 均返回 200）。
+已在 `aarch64-darwin` 上验证：`nix build .#dsh` 成功，`dsh --version` 输出 `0.1.5-rc.1`，
+`dsh web` 能从只读的 store 路径启动并正常提供前端资源（`/manifest.webmanifest` 与
+`assets/*.js` 均返回 200）。产物约 210 MB，构建期不需要网络。
 
 ## 它是怎么构建的
 
@@ -32,32 +32,19 @@ nix profile install github:acehinnnqru/dsh.nix
 `@deepseek-ai/cordis-plugin-hmr`，而它需要 Node 的内部 module loader（仓库自己的开发脚本
 `pnpm dsh` 也带这个 flag）。
 
-### 为什么是「整棵 workspace」而不是上游的精简 deploy 闭包
+### 为什么 deploy 需要 ≥ 11.22.0 的 pnpm
 
-上游 `python/sdk-runtime` 的打包路线是 `pnpm deploy --legacy --prod`，产物约 230 MB，但它在构建期
-会**重新解析整个 workspace**：`pnpm deploy` 的 legacy 路径在 `node-linker=hoisted` 时关掉 lockfile
-（pnpm 源码里就是 `useLockfile: opts.nodeLinker !== "hoisted"`），于是即使有 lockfile 也要去 registry
-取 packument；纯 Nix 构建没有网络，这条路线跑不通（试过 `--config.trustLockfile`、把 pnpm 元数据缓存
-塞进 FOD、黑洞 registry、从零解析预热、以及"先开 injection 再安装"等手段，都会在别处重新解析）。
+仓库 `packageManager` 钉的是 pnpm 11.7.0，而在那个版本上 `pnpm deploy` 只能走 legacy 实现：
+legacy 路径在 `node-linker=hoisted` 时会关掉 lockfile（pnpm 源码里就是
+`useLockfile: opts.nodeLinker !== "hoisted"`），于是构建期必须联网重新解析 —— 纯 Nix 构建跑不通。
+从 **11.22.0** 起 `pnpm deploy` 会注入 workspace 依赖（[pnpm/pnpm#13754](https://github.com/pnpm/pnpm/pull/13754)），
+注入状态记录在 lockfile 的 `settings.injectWorkspacePackages` 里，这条路完全由 lockfile 驱动、
+不需要 registry。社区打包 [moraxyc/deepseek-harness.nix](https://github.com/moraxyc/deepseek-harness.nix)
+用的正是这条（它的 overlay 里就钉着 `pnpmWorkspaceDeployMinVersion = "11.22.0"`），本仓库的 FOD、
+install 与 deploy 因此统一到 nixpkgs 的 `pnpm_11`。
 
-社区仓库 [moraxyc/deepseek-harness.nix](https://github.com/moraxyc/deepseek-harness.nix) 确实做到了精简
-闭包，但做法不是加一个 flag，而是换掉整条链路：
-
-- 自建 **`importPnpmLock`**：把 `pnpm-lock.yaml` / `pnpm-workspace.yaml` 预先转成仓库内的
-  `pnpm-lock.json` / `pnpm-workspace.json`，并配一个自己钉的 pnpm（`pnpmWorkspaceDeploy`）；
-- 用 **injected deploy**（`inject-workspace-packages` + 不带 `--legacy`）逐个
-  `pnpm --filter … deploy --prod` 出 kernel / 每个 bundle / desktop；
-- 用 `dshWorkspacePatchHook` 和两个补丁（`--expose-internals` loader、CSS 结果确定性）**改上游源码**，
-  并新增 `apps/nix-kernel`；
-- 公共 `dsh` 是一个 `stdenvNoCC` **组装**派生（`src = null`）：kernel 的 `lib` +
-  `symlinkJoin` 出来的 `node_modules` + profile/bundle 清单，最后
-  `makeWrapper nodejs-slim … --expose-internals`；
-- 多输出（`out` / `cohort` / `kernel` / `desktop`）+ Cachix 预构建，用户直接 substitute。
-
-本仓库当前选择的是**零补丁 + 全离线**的路线：直接用上游 `pnpm dsh` 运行的那棵树，闭包一定完整、
-不需要补丁也不需要二进制缓存，代价是**体积约 1.3 GB**（含 dev 依赖与测试）。想进一步变瘦，正确做法
-是按上面那套架构重做打包（或直接用社区仓库的产物）；只调 deploy 的 flag 达不到 —— injected deploy
-要求 lockfile 里已经带 injection 记录，而那需要一次联网解析加上仓库自己的 lockfile 工具链。
+同理，构建必须在**开启注入之前**完成：注入会把 workspace 包按 `files` 字段拷成发布形态
+（只有 `lib/`），而构建期需要解析 `@scope/pkg/src/...` 这类子路径。
 
 ## 用法
 
@@ -170,8 +157,8 @@ hash 是**按平台**的（pnpm 只为当前平台拉 optional 依赖），所�
 
 ## 已知限制
 
-- **体积约 1.3 GB**（每个 variant 一份，原因见上文）。
-- 首次构建要下载整个 monorepo 的依赖（约 1.4 GB）并跑完整构建，比较慢；换 revision 时依赖没变就直接复用 store。
+- **产物约 210 MB**；构建期需要约 1.5 GB store + 290 MB 元数据缓存（只存在于构建期，不进运行闭包）。
+- 首次构建要抓约 1.8 GB 的依赖与元数据并跑完整构建，比较慢；换 revision 时依赖没变就直接复用 store。
 - 运行时用 nixpkgs 的 Node 24（wrapper 里钉死，不依赖系统 Node）。
 - `dsh plugin ...` 需要 pnpm 在 PATH 上（HM 的 `pluginManager = true`，或
   `pkgs.dsh.override { extraRuntimePath = [ pkgs.pnpm ]; }`）。
@@ -198,8 +185,9 @@ hash 是**按平台**的（pnpm 只为当前平台拉 optional 依赖），所�
 | `flake.nix` | 输入（nixpkgs / release 源码 / nightly 源码）与输出（packages、overlay、HM 模块、devShell、`.#update-hashes`） |
 | `nix/dsh.nix` | 真正的 derivation：离线安装 → 构建 → 组装并校验运行时树 → wrapper |
 | `nix/deploy-carrier.mjs` | 校验/修补运行时树：补全缺失依赖与 peer、实体化指向树外的链接、清理悬空链接、恢复 native helper 可执行位 |
-| `nix/pnpm.nix` | 按仓库 `packageManager` 声明、从 npm 构建的 pnpm |
-| `nix/hashes.json` / `nix/pnpm-hashes.json` | 依赖闭包 hash / pnpm 发行包 hash 注册表 |
+| `nix/pnpm-deps.nix` | 固定输出抓取：pnpm store + 元数据缓存（离线构建的前提） |
+| `nix/prepare-runtime.mjs` | 构建期小改动：去掉 `packageManager` 钉、为 deploy 开启 injection、删掉触发策略的 postinstall |
+| `nix/hashes.json` | 依赖闭包 hash 注册表（按 lockfile 的 sha256 索引） |
 | `nix/update-hashes.sh` | hash 登记脚本（`nix run .#update-hashes`） |
 | `nix/home-manager.nix` | `programs.dsh.*` 模块 |
 

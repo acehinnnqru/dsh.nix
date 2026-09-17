@@ -2,16 +2,22 @@
  * Build DeepSeek Harness (`dsh`) from a source tree of
  * github.com/deepseek-ai/deepseek-harness.
  *
- * The build mirrors the repository's own release route for the "node carrier":
+ * Build-time network access is confined to one fixed-output fetch
+ * (`nix/pnpm-deps.nix`); everything else runs offline:
  *
- *   1. `pnpm install --offline --frozen-lockfile` from the fixed-output store
- *      produced by `fetchPnpmDeps` (the nixpkgs pnpm setup hook does this).
+ *   1. `pnpm install --offline --frozen-lockfile` from that store, with the
+ *      repository's `packageManager` pin dropped so the pnpm this packaging
+ *      provides is the one that runs.
  *   2. `pnpm run build` — native `flock` addon, host + client TypeScript,
- *      tsdown bundles, and the Vite web frontend.
- *   3. `pnpm --filter dsh-python-runtime-closure deploy --legacy --prod` — the
- *      repository's own runtime closure manifest, deployed as a symlink-free
- *      tree (`nix/deploy-carrier.mjs` materializes the remaining links).
- *   4. Wrap `node <tree>/runtime-bootstrap.mjs` as `$out/bin/dsh`.
+ *      tsdown bundles, and the Vite web frontend. This needs the *linked*
+ *      workspace layout, because the build imports workspace `src/` subpaths.
+ *   3. `pnpm --filter dsh-python-runtime-closure deploy --prod` with
+ *      `injectWorkspacePackages` enabled: workspace packages become
+ *      self-contained copies (~200 MiB) instead of links back into the source
+ *      tree. `deploy-carrier.mjs` then completes the closure, materializes the
+ *      links that leave the tree, restores native helper permissions, and
+ *      asserts the result is relocatable.
+ *   4. Wrap `node --expose-internals <tree>/runtime-bootstrap.mjs` as `dsh`.
  *
  * Dependency hashes live in `hashes.json`, keyed by the sha256 of the source's
  * `pnpm-lock.yaml`, so several pinned revisions can coexist. A revision whose
@@ -22,11 +28,10 @@
   lib,
   stdenv,
   callPackage,
-  fetchPnpmDeps,
   makeWrapper,
   writableTmpDirAsHomeHook,
-  zstd,
   nodejs_24,
+  pnpm_11,
   src,
   # Reported by `dsh --version` and embedded in the web frontend.
   version ? (builtins.fromJSON (builtins.readFile "${src}/package.json")).version,
@@ -42,11 +47,10 @@
   # Explicit override; otherwise looked up in `hashesFile` by lockfile hash.
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
-  pnpmHashesFile ? ./pnpm-hashes.json,
   nodejs ? nodejs_24,
-  # Override the package manager explicitly; by default the release the source
-  # pins in `packageManager` is built from the npm registry (see nix/pnpm.nix).
-  pnpmPackage ? null,
+  # `pnpm deploy` injects workspace dependencies only from 11.22.0 on, so the
+  # deploy step cannot use the release the repository pins in `packageManager`.
+  pnpm ? pnpm_11,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
@@ -73,32 +77,12 @@ let
 
   missingHash = pnpmDepsHash == null && !(registered ? ${stdenv.hostPlatform.system});
 
-  # The repository declares its package manager (`"packageManager": "pnpm@x.y.z"`);
-  # building exactly that release keeps resolution identical to upstream CI.
-  declaredPackageManager =
-    (builtins.fromJSON (builtins.readFile "${src}/package.json")).packageManager or "";
-  pnpmVersion =
-    if lib.hasPrefix "pnpm@" declaredPackageManager then
-      lib.removePrefix "pnpm@" declaredPackageManager
-    else
-      "11.7.0";
-  pnpmHashes = builtins.fromJSON (builtins.readFile pnpmHashesFile);
-  pnpmHash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
-  pnpm =
-    if pnpmPackage != null then
-      pnpmPackage
-    else
-      callPackage ./pnpm.nix {
-        version = pnpmVersion;
-        hash = pnpmHash;
-      };
+  pnpmDeps = callPackage ./pnpm-deps.nix {
+    inherit src version pnpm nodejs;
+    hash = resolvedHash;
+  };
 in
-lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
-  dsh: no registry hash for pnpm ${pnpmVersion} (the release ${version} pins);
-  building with a placeholder hash so Nix prints the real one. Register it with:
-    nix run .#update-hashes -- pnpm
-''
-  (lib.warnIf missingHash ''
+lib.warnIf missingHash ''
   dsh: no pnpm dependency hash registered for ${version} (lockfile key ${lockKey})
   on ${stdenv.hostPlatform.system}; building with a placeholder hash so Nix prints
   the real one. Register it with:  nix run .#update-hashes -- dsh
@@ -106,21 +90,13 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
   stdenv.mkDerivation (finalAttrs: {
     pname = "dsh";
     inherit version src;
-
-    pnpmDeps = fetchPnpmDeps {
-      inherit (finalAttrs) pname version src;
-      inherit pnpm;
-      fetcherVersion = 3;
-      hash = resolvedHash;
-    };
+    inherit pnpmDeps;
 
     nativeBuildInputs = [
       nodejs
       pnpm
       makeWrapper
       writableTmpDirAsHomeHook
-      # `tar --zstd` unpacks the fetched dependency store (nix/pnpm.nix).
-      zstd
     ] ++ extraNativeBuildInputs;
 
     env = {
@@ -128,9 +104,6 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       DSH_CLIENT_COMMIT_HASH = commitHash;
       # The desktop app is outside this closure and its binary is never built.
       ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
-      # pnpm would otherwise insist on the `packageManager` pin it reads from
-      # package.json, which corepack normally provides.
-      pnpm_config_pm_on_fail = "ignore";
       # Keep every pnpm invocation offline; the store already holds the closure.
       npm_config_offline = "true";
       # Never let `pnpm run` silently re-resolve dependencies (it would reach
@@ -140,22 +113,29 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
       NODE_OPTIONS = "--max-old-space-size=4096";
     };
 
-    # Unpack the fixed-output dependency store and run the offline install, the
-    # job nixpkgs' `pnpmConfigHook` does — plus the metadata cache above, which
-    # the hook does not know about.
     configurePhase = ''
       runHook preConfigure
 
-      export STORE_PATH=$(mktemp -d)
-      tar --zstd -xf ${finalAttrs.pnpmDeps}/pnpm-store.tar.zst -C "$STORE_PATH"
-      chmod -R +w "$STORE_PATH"
-      pnpm config set store-dir "$STORE_PATH"
-      pnpm config set cache-dir "$STORE_PATH/pnpm-cache"
-      # Hard links are unavailable across some store filesystems.
-      pnpm config set package-import-method clone-or-copy
+      # The fetched store and metadata cache are read-only store paths; work on
+      # writable copies so pnpm can update its indices.
+      export STORE_PATH=$TMPDIR/pnpm-store
+      export CACHE_PATH=$TMPDIR/pnpm-cache
+      cp -a ${finalAttrs.pnpmDeps}/store "$STORE_PATH"
+      cp -a ${finalAttrs.pnpmDeps}/cache "$CACHE_PATH"
+      chmod -R u+w "$STORE_PATH" "$CACHE_PATH"
+
+      ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
 
       echo "Installing dependencies"
-      pnpm install --offline --ignore-scripts --frozen-lockfile --config.trustLockfile=true
+      pnpm install \
+        --offline \
+        --ignore-scripts \
+        --frozen-lockfile \
+        --store-dir "$STORE_PATH" \
+        --cache-dir "$CACHE_PATH" \
+        --config.trustLockfile=true \
+        --config.manage-package-manager-versions=false \
+        --config.minimum-release-age=0
       patchShebangs node_modules/{*,.*}
 
       runHook postConfigure
@@ -164,7 +144,7 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     buildPhase = ''
       runHook preBuild
       if [ ! -d node_modules/.pnpm ]; then
-        echo "dsh: the pnpm setup hook did not populate node_modules" >&2
+        echo "dsh: the offline install did not populate node_modules" >&2
         exit 1
       fi
       pnpm run build
@@ -174,26 +154,30 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     installPhase = ''
       runHook preInstall
 
-      mkdir -p $out/lib/dsh
-      # Ship the built workspace exactly as `pnpm dsh` runs it: sources, the
-      # built `lib/` and web `dist/` artifacts, and the dependency tree installed
-      # above. Every workspace package, plugin and peer stays resolvable inside
-      # the tree, so no registry access is needed at build or run time. (The
-      # repository's slimmer `pnpm deploy` route cannot be used here: with
-      # `node-linker=hoisted` pnpm disables lockfile use and re-resolves the
-      # workspace against the registry, which a pure build cannot reach.)
-      tar -cf - . | tar -xf - -C $out/lib/dsh
+      mkdir -p $out/lib
 
-      # Verify the tree is relocatable (no link escapes it), complete, and
-      # executable where it has to be.
-      node ${./deploy-carrier.mjs} \
-        --root "$out/lib/dsh" \
-        --staging "$out/lib/dsh" \
-        --entry python/sdk-runtime/runtime-bootstrap.mjs
+      # Switch to injected workspace packages for the deploy only (see the
+      # header): the build above needed the linked layout.
+      ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage deploy --root "$PWD"
+
+      PNPM_CONFIG_OFFLINE=true pnpm --filter dsh-python-runtime-closure deploy \
+        --prod \
+        --store-dir "$STORE_PATH" \
+        --cache-dir "$CACHE_PATH" \
+        --config.node-linker=hoisted \
+        --config.link-workspace-packages=true \
+        --config.manage-package-manager-versions=false \
+        --config.minimum-release-age=0 \
+        $out/lib/dsh
+
+      # Complete and verify the tree: restore peers the deploy manifest omits,
+      # materialize links that leave it, drop dangling optional links, and make
+      # node-pty's prebuilt spawn helper executable.
+      node ${./deploy-carrier.mjs} --root "$PWD" --staging "$out/lib/dsh"
 
       makeWrapper ${lib.getExe nodejs} $out/bin/dsh \
         ${lib.optionalString exposeInternals "--add-flags --expose-internals"} \
-        --add-flags $out/lib/dsh/python/sdk-runtime/runtime-bootstrap.mjs \
+        --add-flags $out/lib/dsh/runtime-bootstrap.mjs \
         ${lib.optionalString (extraRuntimePath != [ ]) ''
           --prefix PATH : ${lib.makeBinPath extraRuntimePath} \
         ''}
@@ -217,14 +201,13 @@ lib.warnIf (!(pnpmHashes ? ${pnpmVersion})) ''
     };
 
     passthru = {
-      inherit lockKey pnpmVersion;
+      inherit lockKey;
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
       inherit pnpm;
       # Version switching: `pkgs.dsh.override { src = ...; }`.
-      inherit hashesFile pnpmHashesFile;
+      inherit hashesFile;
     };
   })
-  )
 )
