@@ -32,6 +32,7 @@
 {
   lib,
   stdenv,
+  callPackage,
   fetchPnpmDeps,
   pnpmConfigHook,
   makeWrapper,
