@@ -120,31 +120,22 @@ lib.warnIf missingHash ''
     pname = "dsh";
     inherit version src;
 
-    pnpmDeps = (fetchPnpmDeps {
+    pnpmDeps = fetchPnpmDeps {
       pname = "dsh";
       inherit version src;
       pnpm = resolvedPnpm;
       fetcherVersion = 3;
       hash = resolvedHash;
-      # nixpkgs' fetcher does the reproducibility work (reproducible tarball,
-      # sorted JSON, `pnpm-fixup-state-db`). Two additions here:
-      #   * keep pnpm's registry metadata cache next to the store, because the
-      #     build has no network and both the install and the deploy's
-      #     resolution read packuments;
-      #   * normalise the workspace before the fetcher's install runs.
+      # Only addition to nixpkgs' fetcher: keep pnpm's registry metadata cache
+      # next to the store, because the build has no network and both the
+      # install and the deploy's resolution read packuments. Everything else is
+      # left at its defaults — in particular the platform-complete store that
+      # its `--force` produces, which is what makes the offline install able to
+      # satisfy every optional dependency the build might ask for.
       prePnpmInstall = ''
         pnpm config set cache-dir "$storePath/pnpm-cache"
-        ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage fetch --root "$PWD"
       '';
-    }).overrideAttrs (old: {
-      # nixpkgs' fetcher passes `--force`, which downloads every platform build
-      # of the workspace's per-platform optional dependencies (~1.4 GB of
-      # @openai/codex-* and @anthropic-ai/claude-agent-sdk-* binaries). Those
-      # are never installed here — hashes are registered per platform — and the
-      # download is what exhausted the builder's file handles. Keep everything
-      # else about the fetcher (store setup, reproducible tarball, fixups).
-      installPhase = lib.replaceStrings [ "--force" ] [ "" ] old.installPhase;
-    });
+    };
 
     nativeBuildInputs = [
       nodejs
