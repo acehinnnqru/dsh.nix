@@ -112,10 +112,13 @@ let
     hash = resolvedHash;
     prePnpmInstall = ''
       pnpm config set cache-dir "$storePath/pnpm-cache"
-      ${lib.getExe deployPnpm} install \
-        --lockfile-only \
-        --force \
-        --ignore-scripts \
+      # Also fetch every tarball the lockfile lists, with the pnpm that runs the
+      # deploy: injected copies can pull packages the plain workspace install
+      # never needed. `pnpm fetch` is lockfile-driven, so it does not re-resolve
+      # (and does not trip the `allowBuilds` validation pnpm 11.2x applies while
+      # resolving, which is why the deploy's pnpm must not run a real install
+      # during the fetch).
+      ${lib.getExe deployPnpm} fetch \
         --store-dir "$storePath" \
         --cache-dir "$storePath/pnpm-cache" \
         --config.manage-package-manager-versions=false \
