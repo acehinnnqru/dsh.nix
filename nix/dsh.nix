@@ -54,7 +54,14 @@
   pnpmDepsHash ? null,
   hashesFile ? ./hashes.json,
   nodejs ? nodejs_24,
-  pnpm ? pnpm_11,
+  # pnpm for the fetch, install and build. Defaults to the release the
+  # repository pins in `packageManager`.
+  pnpm ? null,
+  # pnpm for the deploy step, which needs >= 11.22.0 to inject workspace
+  # packages (pnpm/pnpm#13754). It must not run in the fetch: while resolving
+  # it rewrites pnpm-workspace.yaml, and under the builder's file-handle limits
+  # its downloader aborts (ENFILE) on the large per-platform binaries.
+  deployPnpm ? pnpm_11,
   # Extra programs placed on `dsh`'s runtime PATH (for example `pkgs.pnpm` to
   # make `dsh plugin ...` able to manage profiles, or `pkgs.git`).
   extraRuntimePath ? [ ],
@@ -87,6 +94,21 @@ let
   # otherwise download all of them (~1.4 GB) for a platform-complete store.
   npmArch = stdenv.hostPlatform.node.arch;
   npmPlatform = stdenv.hostPlatform.node.platform;
+
+  pnpmVersion =
+    let
+      declared = (builtins.fromJSON (builtins.readFile "${src}/package.json")).packageManager or "";
+    in
+    if lib.hasPrefix "pnpm@" declared then lib.removePrefix "pnpm@" declared else "11.7.0";
+  pnpmHashes = builtins.fromJSON (builtins.readFile ./pnpm-hashes.json);
+  resolvedPnpm =
+    if pnpm != null then
+      pnpm
+    else
+      callPackage ./pnpm.nix {
+        version = pnpmVersion;
+        hash = pnpmHashes.${pnpmVersion} or lib.fakeHash;
+      };
 in
 lib.warnIf missingHash ''
   dsh: no pnpm dependency hash registered for ${version} (lockfile key ${lockKey})
@@ -99,7 +121,8 @@ lib.warnIf missingHash ''
 
     pnpmDeps = (fetchPnpmDeps {
       pname = "dsh";
-      inherit version src pnpm;
+      inherit version src;
+      pnpm = resolvedPnpm;
       fetcherVersion = 3;
       hash = resolvedHash;
       # nixpkgs' fetcher does the reproducibility work (reproducible tarball,
@@ -124,7 +147,7 @@ lib.warnIf missingHash ''
 
     nativeBuildInputs = [
       nodejs
-      pnpm
+      resolvedPnpm
       makeWrapper
       writableTmpDirAsHomeHook
       # Unpacks `pnpmDeps` (it brings zstd and a writable $HOME) and runs the
@@ -183,7 +206,7 @@ lib.warnIf missingHash ''
       # the build needed the linked layout.
       ${lib.getExe nodejs} ${./prepare-runtime.mjs} --stage deploy --root "$PWD"
 
-      PNPM_CONFIG_OFFLINE=true pnpm --filter dsh-python-runtime-closure deploy \
+      PNPM_CONFIG_OFFLINE=true ${lib.getExe deployPnpm} --filter dsh-python-runtime-closure deploy \
         --prod \
         --store-dir "$STORE_PATH" \
         --cache-dir "$STORE_PATH/pnpm-cache" \
@@ -226,7 +249,8 @@ lib.warnIf missingHash ''
       # `nix build .#dsh.pnpmDeps` fetches (or fixes) the dependency store.
       inherit (finalAttrs) pnpmDeps;
       node = nodejs;
-      inherit pnpm hashesFile;
+      pnpm = resolvedPnpm;
+      inherit deployPnpm pnpmVersion hashesFile;
     };
   })
 )
