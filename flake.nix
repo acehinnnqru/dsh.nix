@@ -44,23 +44,16 @@
         system: args:
         (pkgsFor system).callPackage ./nix/dsh.nix args;
 
-      # The hash registry and the updater app are shared by every system.
-      updateHashesFor =
-        system:
+      updateMetadataFor = system:
         let
           pkgs = pkgsFor system;
-        in
-        pkgs.writeShellApplication {
-          name = "dsh-nix-update-hashes";
-          runtimeInputs = [
-            pkgs.coreutils
-            pkgs.gnugrep
-            pkgs.gnused
-            pkgs.jq
-          ];
-          text = builtins.readFile ./nix/update-hashes.sh;
-          # jq programs pass `$field` names inside single quotes on purpose.
-          excludeShellChecks = [ "SC2016" ];
+          python = pkgs.python3.withPackages (p: [ p.pyyaml ]);
+        in pkgs.writeShellApplication {
+          name = "dsh-nix-update-metadata";
+          runtimeInputs = [ python ];
+          text = ''
+            exec python ${./nix/update-metadata.py} "$@"
+          '';
         };
     in
     {
@@ -77,7 +70,7 @@
         in
         {
           inherit dsh dsh-nightly;
-          update-hashes = updateHashesFor system;
+          update-metadata = updateMetadataFor system;
           default = dsh;
         }
       );
@@ -142,16 +135,28 @@
       );
 
       apps = forAllSystems (system: {
-        update-hashes = {
+        update-metadata = {
           type = "app";
-          program = nixpkgs.lib.getExe (updateHashesFor system);
-          meta.description = "Register pnpm dependency hashes for the pinned harness revisions";
+          program = nixpkgs.lib.getExe (updateMetadataFor system);
+          meta.description = "Generate dependency metadata from a harness source checkout";
         };
       });
 
-      checks = forAllSystems (system: {
-        dsh = self.packages.${system}.dsh;
-      });
+      checks = forAllSystems (system:
+        let
+          pkgs = pkgsFor system;
+          python = pkgs.python3.withPackages (p: [ p.pyyaml ]);
+        in {
+          dsh = self.packages.${system}.dsh;
+          runtime-manifest = pkgs.runCommand "dsh-runtime-manifest-test" {
+            nativeBuildInputs = [ python ];
+          } ''
+            cp ${./nix/prepare-runtime.py} prepare-runtime.py
+            cp ${./nix/test-prepare-runtime.py} test-prepare-runtime.py
+            python test-prepare-runtime.py
+            touch $out
+          '';
+        });
 
       formatter = forAllSystems (system: (pkgsFor system).nixfmt-rfc-style);
     };
