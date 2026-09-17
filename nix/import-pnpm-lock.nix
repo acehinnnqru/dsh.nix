@@ -46,6 +46,12 @@ let
   env = {
     NIX_NPM_REGISTRY = "https://registry.npmjs.org";
     pnpm_config_manage_package_manager_versions = "false";
+    # Rewriting each tarball to a local Nix store path makes pnpm 11.25's
+    # resolution-shape verifier reject the lockfile ("a registry-style
+    # dependency path is backed by a non-registry resolution"). The lockfile is
+    # not untrusted here: every entry is either the reviewed upstream lockfile
+    # or a tarball whose integrity Nix already checked, so skip that verifier
+    # instead of teaching it about Nix store paths.
     pnpm_config_trust_lockfile = "true";
     pnpm_config_verify_deps_before_run = "false";
   };

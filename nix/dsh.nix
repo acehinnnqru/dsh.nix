@@ -1,9 +1,17 @@
 { lib, stdenv, callPackage, pnpmConfigHook, makeWrapper, writableTmpDirAsHomeHook,
-  nodejs_24, pnpm_11, src,
+  nodejs_22, nodejs_24, pnpm_11, src,
   version ? (builtins.fromJSON (builtins.readFile "${src}/package.json")).version,
   commitHash ? src.rev or "0000000",
   dependencyMetadata ? null,
   runtimeNode ? nodejs_24,
+  # pnpm runs on Node 22 on purpose: on Node 24 every `pnpm install` in the
+  # build sandbox aborts at the end of the install with
+  # `Assertion failed: (errno == EINTR), function uv__io_poll, file kqueue.c`,
+  # after Node has already reported "File descriptor N closed but not opened in
+  # unmanaged mode" for pnpm's worker descriptors. Node 22 runs the same install
+  # without those warnings. This only affects the package manager; `runtimeNode`
+  # still decides which Node the installed dsh runs on.
+  pnpmNode ? nodejs_22,
   pnpmPackage ? null,
   extraRuntimePath ? [ ],
   exposeInternals ? true,
@@ -14,7 +22,7 @@ let
   lockKey = builtins.substring 0 16 (builtins.hashFile "sha256" "${src}/pnpm-lock.yaml");
   metadataPath = if dependencyMetadata != null then dependencyMetadata else ./metadata + "/${lockKey}";
   resolvedPnpm = if pnpmPackage != null then pnpmPackage else pnpm_11.override {
-    nodejs = nodejs;
+    nodejs = pnpmNode;
     version = "11.25.0";
     hash = "sha256-M90HSPJ+eRbE8ci2lDRhmD40U7BrvaYxKmKAEwtIgeU=";
   };
@@ -56,11 +64,16 @@ stdenv.mkDerivation {
     # Copy the public CLI entry into our manifest-owned application anchor.
     cp -R apps/cli/lib apps/nix-runtime/lib
     cp -R apps/cli/config apps/nix-runtime/config
-    pnpm config set --location=project inject-workspace-packages true
     pnpm --filter @deepseek-ai/dsh-nix-runtime deploy --prod \
       --store-dir "$STORE_PATH" --config.node-linker=hoisted \
-      --config.link-workspace-packages=true --ignore-scripts "$out/lib/dsh"
-    node "$out/lib/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/scripts/ensure-spawn-helper.mjs"
+      --ignore-scripts "$out/lib/dsh"
+    # node-pty's macOS spawn helper must be executable. The workspace
+    # postinstall that normally does this is skipped during deploy, so run it
+    # from inside the deployed tree: the script resolves `node-pty` relative to
+    # its own location, which keeps the chmod on the runtime copy.
+    ( cd "$out/lib/dsh/node_modules/@deepseek-ai/dsh-subprocess-local" \
+      && node scripts/ensure-spawn-helper.mjs )
+    test -x "$out/lib/dsh/node_modules/node-pty/prebuilds/darwin-$(node -p process.arch)/spawn-helper"
     node ${./verify-runtime.mjs} "$out/lib/dsh"
     makeWrapper ${lib.getExe nodejs} "$out/bin/dsh" \
       ${lib.optionalString exposeInternals "--add-flags --expose-internals"} \
@@ -81,6 +94,7 @@ stdenv.mkDerivation {
     metadata = metadataPath;
     node = nodejs;
     pnpm = resolvedPnpm;
+    pnpmNode = pnpmNode;
   };
   meta = {
     description = "DeepSeek Harness CLI and Web, built offline from locked sources";

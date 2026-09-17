@@ -1,5 +1,6 @@
 """Run without credentials against an installed dsh output (outside build sandbox)."""
 import argparse
+import http.cookiejar
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 parser = argparse.ArgumentParser()
@@ -48,27 +50,55 @@ terminal.onExit(({exitCode}) => {
                                    cwd=temporary, env=env, stdout=output, stderr=subprocess.STDOUT,
                                    start_new_session=True)
     origin = f'http://127.0.0.1:{port}'
+    # The server refuses unauthenticated requests: it prints one URL carrying
+    # the access token, which trades that token for a session cookie and
+    # redirects to `/`. Follow that with a cookie jar, then check the assets the
+    # served HTML actually references.
+    served_origin = origin + '/'
+    cookie_jar = http.cookiejar.CookieJar()
     # Do not let ambient proxy settings redirect localhost checks.
-    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    http = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+    )
     try:
         for _ in range(120):
             if process.poll() is not None:
                 raise RuntimeError('Web exited early:\n' + log.read_text())
+            served = re.search(r'http://127\.0\.0\.1:\d+/[^\s]*', log.read_text())
+            if served:
+                served_origin = served.group(0)
             try:
-                with http.open(origin + '/', timeout=1) as response:
+                with http.open(served_origin, timeout=1) as response:
                     html = response.read().decode()
                 break
             except (OSError, TimeoutError):
                 time.sleep(0.5)
         else:
             raise RuntimeError('Web startup timed out:\n' + log.read_text())
-        assets = sorted(set(re.findall(r'''(?:src|href)=["'](/assets/[^"']+)["']''', html)))
+        if not served_origin.startswith(origin):
+            raise RuntimeError(f'Web advertised an unexpected origin: {served_origin}')
+        token = urllib.parse.parse_qs(urllib.parse.urlsplit(served_origin).query).get('token', [''])[0]
+        # The SPA is built with relative asset URLs ("./assets/..."), so resolve
+        # whatever the HTML references against the URL that served it.
+        referenced = re.findall(r'''(?:src|href)=["']([^"'#]+)["']''', html)
+        assets = sorted({path for path in referenced if '/assets/' in path})
         if not any('.js' in asset for asset in assets):
             raise RuntimeError('No built JavaScript asset referenced by served HTML')
         for asset in ['/manifest.webmanifest', *assets]:
-            with http.open(origin + asset, timeout=10) as response:
-                assert response.status == 200, asset
-                assert response.read(), asset
+            url = urllib.parse.urljoin(served_origin, asset)
+            # Static assets are served without the token; retry with it so a
+            # stricter server still passes this check rather than failing it.
+            for candidate in (url, f'{url}?token={token}'):
+                try:
+                    with http.open(candidate, timeout=10) as response:
+                        if response.status != 200 or not response.read():
+                            raise RuntimeError(f'{asset} returned {response.status}')
+                    break
+                except (OSError, TimeoutError) as error:
+                    last = error
+            else:
+                raise RuntimeError(f'{asset} could not be fetched: {last}')
         print(json.dumps({'version': version, 'cli': 'passed', 'web': 'passed', 'assets': len(assets)}))
     except Exception:
         print(log.read_text())

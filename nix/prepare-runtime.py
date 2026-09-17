@@ -1,7 +1,14 @@
-"""Prepare a locked Nix runtime before pnpm resolves or deploys anything."""
+"""Prepare a locked Nix runtime before pnpm resolves or deploys anything.
+
+Two of the edits below exist only because the pinned pnpm (11.25.0) reads
+`pnpm-workspace.yaml` more strictly than the version upstream pins
+(`packageManager: pnpm@11.7.0`). Both are narrow, named rewrites rather than a
+general "make it install" pass, and both are covered by test-prepare-runtime.py.
+"""
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import yaml
 
@@ -18,13 +25,56 @@ def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + '\n')
 
+# pnpm names a workspace-linked package "<name>@file:<relative path>" in these
+# settings. pnpm 11.25 parses the part after the last "@" as an exact-version
+# union and aborts with ERR_PNPM_INVALID_VERSION_UNION, so the version policy
+# keys have to name the package without its link.
+WORKSPACE_LINK = re.compile(r'^(?P<name>@[^@/]+/[^@]+|[^@/][^@]*)@file:')
+
+def normalize_policy_keys(settings, key):
+    """Strip the `@file:` link from `<name>@file:...` keys, keeping their value."""
+    values = settings.get(key)
+    if not isinstance(values, dict):
+        return []
+    renamed = []
+    for name in [n for n in values if WORKSPACE_LINK.match(n)]:
+        bare = WORKSPACE_LINK.match(name).group('name')
+        values[bare] = values.pop(name)
+        renamed.append(f'{name} -> {bare}')
+    return renamed
+
+def drop_workspace_link_excludes(settings, key):
+    """Drop release-age exclusions that name a workspace link, not a version.
+
+    The setting gates registry releases by publish time; a workspace link has no
+    release to gate, and pnpm 11.25 refuses to parse it.
+    """
+    entries = settings.get(key)
+    if not isinstance(entries, list):
+        return []
+    kept = [entry for entry in entries
+            if not (isinstance(entry, str) and WORKSPACE_LINK.match(entry))]
+    dropped = [entry for entry in entries if entry not in kept]
+    if dropped:
+        settings[key] = kept
+    return dropped
+
 lock = yaml.safe_load((root / 'pnpm-lock.yaml').read_text())
 workspace = yaml.safe_load((root / 'pnpm-workspace.yaml').read_text())
 # Pin the executable in Nix, never let a manifest download a different pnpm.
 manifest = read(root / 'package.json')
 manifest.pop('packageManager', None)
 write(root / 'package.json', manifest)
-workspace['allowBuilds'] = {k: v for k, v in workspace.get('allowBuilds', {}).items() if '@file:' not in k}
+for dropped in drop_workspace_link_excludes(workspace, 'minimumReleaseAgeExclude'):
+    print(f'Dropped workspace-link release-age exclusion: {dropped}')
+for renamed in normalize_policy_keys(workspace, 'allowBuilds'):
+    print(f'Normalized allowBuilds key for pnpm 11.25: {renamed}')
+# `pnpm deploy` refuses to run from a workspace without injected workspace
+# packages, and `pnpm config set` cannot express it: pnpm reads this setting
+# only from pnpm-workspace.yaml. Setting it before the dependency fetch keeps
+# the prepared lockfile consistent with the workspace, so every later
+# `--frozen-lockfile` install still accepts it.
+workspace['injectWorkspacePackages'] = True
 for name, tarball in read(args.tarballs).items():
     lock['packages'][name]['resolution']['tarball'] = 'file:' + tarball
 
@@ -61,18 +111,35 @@ for name in sorted(visited):
         selected[name] = 'workspace:^'
 
 runtime_path = 'apps/nix-runtime'
+# Every root is a workspace package, so pnpm's `workspace:` range is the right
+# specifier — except where the workspace root overrides the name to a local
+# link. pnpm applies that override to this manifest as well, but resolves the
+# override's path from this manifest, not from the workspace root.
+manifest_roots = {}
+for name, spec in selected.items():
+    override = workspace.get('overrides', {}).get(name, '')
+    if override.startswith('link:'):
+        target = os.path.relpath(override[len('link:'):], runtime_path)
+        override = 'link:' + target
+    manifest_roots[name] = override or spec
 write(root / runtime_path / 'package.json', {
     'name': '@deepseek-ai/dsh-nix-runtime', 'version': manifest['version'],
     'private': True, 'type': 'module', 'files': ['lib', 'config'],
-    'dependencies': dict(sorted(selected.items())),
+    'dependencies': dict(sorted(manifest_roots.items())),
 })
+# The importer for that manifest has to be written here: pnpm only learns about
+# it by resolving against the registry, and every later install runs offline
+# with --frozen-lockfile. pnpm compares each `specifier` against the manifest it
+# belongs to, so both sides are derived from the same value above.
 entries = {}
-for name, spec in selected.items():
+for name, spec in manifest_roots.items():
     package_path, _ = packages[name]
     link = 'link:' + os.path.relpath(package_path, runtime_path)
-    override = workspace.get('overrides', {}).get(name, '')
-    entries[name] = {'specifier': link if override.startswith('link:') else spec, 'version': link}
+    entries[name] = {'specifier': spec, 'version': link}
 lock['importers'][runtime_path] = {'dependencies': dict(sorted(entries.items()))}
+# pnpm records this setting in the lockfile and refuses to install when the two
+# disagree, so both sides change together.
+lock.setdefault('settings', {})['injectWorkspacePackages'] = True
 
 # pnpm deploy must not run the source-only postinstall. Its exact operation is
 # invoked against the assembled runtime after deployment instead.
