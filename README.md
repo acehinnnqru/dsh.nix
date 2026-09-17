@@ -44,16 +44,19 @@ nix build .#dsh
 # 1. 修改 flake.nix 中 dsh-src 的 tag，然后更新锁定 revision。
 nix flake update dsh-src
 
-# 2. 从 flake 锁定的源生成元数据（必须是锁定源，不是任意工作树）。
-nix build --no-link --print-out-paths --impure --expr \
-  '(builtins.getFlake (toString ./.)).inputs.dsh-src'
-nix run .#update-metadata -- <上面输出的 store 路径>
+# 2. 同步依赖元数据：报告 flake 锁定的源、lockKey 与该目录是否最新，
+#    需要时直接重新生成。幂等，可以随时重跑。
+nix/update-metadata-for-input.sh          # 两个输出都检查
+nix/update-metadata-for-input.sh dsh      # 只检查固定版本
 
-# 3. 提交 nix/metadata 的改动，再构建。
-nix build .#dsh
+# 3. 构建并提交：flake.lock 与 nix/metadata 必须在同一次提交里。
+nix build .#dsh .#dsh-nightly
+python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
-元数据的 `source.json` 记录格式版本和 lock/workspace 的 SHA-256；与源码不一致或格式过旧都会在求值阶段明确失败。`dsh-nightly` 用同样的步骤，源换成 `inputs.dsh-nightly-src`。
+完整的升级流程、失败症状对照表和注意事项见 **[MAINTAINING.md](./MAINTAINING.md)**。
+
+元数据的 `source.json` 记录格式版本和 lock/workspace 的 SHA-256；与源码不一致或格式过旧都会在求值阶段明确失败。一个新 tag 不一定改 lock，此时 `lockKey` 不变、无需重新生成，脚本只会提醒记录的版本号需要跟着走。
 
 覆盖源码时可以同时提供元数据目录：
 
