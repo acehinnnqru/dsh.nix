@@ -138,10 +138,9 @@ lib.warnIf missingHash ''
       resolvedPnpm
       makeWrapper
       writableTmpDirAsHomeHook
-      # Unpacks `pnpmDeps` and runs the offline install in `postConfigure`.
+      # Unpacks `pnpmDeps` (it brings zstd) and runs the offline install in
+      # `postConfigure`.
       pnpmConfigHook
-      # `tar --zstd` unpacks the fetched store.
-      zstd
     ] ++ extraNativeBuildInputs;
 
     env = {
