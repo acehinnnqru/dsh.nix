@@ -6,6 +6,3 @@
 # `nix build` result symlinks.
 /result
 /result-*
-
-# Store created by ad-hoc pnpm runs while debugging; never part of a build.
-/.pnpm-store/
