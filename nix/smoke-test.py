@@ -8,6 +8,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -25,6 +26,18 @@ with tempfile.TemporaryDirectory(prefix='dsh-smoke-') as temporary:
     cli = str(package / 'bin/dsh')
     version = subprocess.check_output([cli, '--version'], env=env, text=True).strip()
     subprocess.run([cli, '--help'], env=env, stdout=subprocess.DEVNULL, check=True)
+    # `dsh plugin` forwards to pnpm, and the package is supposed to keep the
+    # pinned one on the runtime PATH by default, so plugin management must work
+    # with nothing else installed. Gate on an explicit opt-in: a build with
+    # `pluginPnpm = false` is a supported configuration, not a failure.
+    if os.environ.get('DSH_SMOKE_EXPECT_PNPM') == '1':
+        plugin = subprocess.run([cli, 'plugin', '--profile', 'smoke-probe', 'list'],
+                                env=env, text=True, capture_output=True)
+        if 'pnpm not found on PATH' in plugin.stdout + plugin.stderr:
+            sys.exit('pnpm is not on the runtime PATH even though pluginPnpm is '
+                     'meant to be on (build with pluginPnpm = false and unset '
+                     'DSH_SMOKE_EXPECT_PNPM, or restore the bundled pnpm)')
+        print('pnpm: passed')
     # Verify the installed native binary, not a development node_modules tree.
     pty_test = r'''
 const {createRequire} = require('node:module');

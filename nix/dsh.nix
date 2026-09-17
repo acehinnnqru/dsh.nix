@@ -13,6 +13,13 @@
   # still decides which Node the installed dsh runs on.
   pnpmNode ? nodejs_22,
   pnpmPackage ? null,
+  # Put the pinned pnpm on the runtime PATH so `dsh plugin ...` works without the
+  # caller arranging one. It is the same pnpm the build uses, and it only decides
+  # which `pnpm` the name resolves to: `--prefix PATH` prepends, so every other
+  # entry of the inherited PATH survives untouched. An explicit
+  # `extraRuntimePath` still wins over it, because a later `--prefix` lands in
+  # front of an earlier one.
+  pluginPnpm ? true,
   extraRuntimePath ? [ ],
   exposeInternals ? true,
   extraNativeBuildInputs ? [ ],
@@ -78,6 +85,7 @@ stdenv.mkDerivation {
     makeWrapper ${lib.getExe nodejs} "$out/bin/dsh" \
       ${lib.optionalString exposeInternals "--add-flags --expose-internals"} \
       --add-flags "$out/lib/dsh/lib/bin.js" \
+      ${lib.optionalString pluginPnpm ''--prefix PATH : ${lib.makeBinPath [ resolvedPnpm ]}''} \
       ${lib.optionalString (extraRuntimePath != [ ]) ''--prefix PATH : ${lib.makeBinPath extraRuntimePath}''}
     runHook postInstall
   '';
@@ -89,7 +97,7 @@ stdenv.mkDerivation {
     runHook postInstallCheck
   '';
   passthru = {
-    inherit lockKey;
+    inherit lockKey pluginPnpm;
     source = src;
     metadata = metadataPath;
     node = nodejs;

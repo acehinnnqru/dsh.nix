@@ -106,10 +106,18 @@ toolchain.
   programs.dsh = {
     enable = true;
     # home = "/home/alice/.dsh";
-    # pluginManager = true; # puts pnpm on PATH for plugin management
+    # pluginPnpm = false; # drop the bundled pnpm and use your own
   };
 }
 ```
+
+`dsh plugin --profile <name> ...` forwards to pnpm, so the package keeps the pnpm it
+pins on the runtime `PATH` — the same version it builds with, never the caller's
+`pkgs.pnpm`. Plugin management therefore works with nothing else installed; set
+`pluginPnpm = false` to drop it and resolve `pnpm` from the PATH the harness was
+started with instead. (The old `pluginManager` name is still accepted, and decides
+the same thing.) `extraPackages` covers anything else the harness should reach from
+every child process, for example `pkgs.git` for `git+` plugin specs.
 
 You can also use the `pkgs.dsh` and `pkgs.dsh-nightly` provided by `overlays.default`, or install
 `packages.<system>.dsh` directly.
@@ -121,16 +129,19 @@ checks run outside the build sandbox and need a temporary `HOME`/`DSH_HOME`, but
 
 ```sh
 nix build .#dsh
-python3 nix/smoke-test.py ./result \
+DSH_SMOKE_EXPECT_PNPM=1 python3 nix/smoke-test.py ./result \
   --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
-`smoke-test.py` checks three things:
+`smoke-test.py` checks four things, the last of them only under `DSH_SMOKE_EXPECT_PNPM=1`:
 
 1. CLI: `--version` equals the built version and `--help` exits cleanly.
-2. PTY: creates a real terminal with the runtime's own `node-pty`, runs a command and reads its
+2. Plugins: `dsh plugin --profile <fresh> list` finds a pnpm, proving the default build carries the
+   pinned one on the runtime `PATH` with nothing else installed. Opt in because `pluginPnpm = false`
+   is a supported build.
+3. PTY: creates a real terminal with the runtime's own `node-pty`, runs a command and reads its
    output.
-3. Web: starts `dsh web --no-open` under a temporary directory, follows the token-bearing URL the
+4. Web: starts `dsh web --no-open` under a temporary directory, follows the token-bearing URL the
    CLI prints (exchanging it for a session cookie) to fetch the home page, then fetches every
    `/assets/*` the page actually references plus `manifest.webmanifest`.
 

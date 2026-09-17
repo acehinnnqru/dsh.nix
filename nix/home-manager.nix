@@ -4,10 +4,11 @@
  *   programs.dsh = {
  *     enable = true;
  *     home = "~/.dsh";
- *     pluginManager = true;
+ *     # pluginPnpm = false; # drop the bundled pnpm and use your own
  *   };
  *
- * Installs the `dsh` CLI and, when asked, the profile plugin manager.
+ * Installs the `dsh` CLI. The package carries the pinned pnpm on its runtime
+ * PATH by default, so `dsh plugin ...` works without arranging one.
  */
 { self }:
 {
@@ -22,6 +23,14 @@ let
   system = pkgs.stdenv.hostPlatform.system;
 in
 {
+  imports = [
+    # `pluginManager` only ever provisioned pnpm for `dsh plugin`, which is now
+    # the default and named `pluginPnpm`. Renaming keeps a configuration that
+    # sets the old name evaluating and still deciding, with the framework's own
+    # deprecation warning.
+    (lib.mkRenamedOptionModule [ "programs" "dsh" "pluginManager" ] [ "programs" "dsh" "pluginPnpm" ])
+  ];
+
   options.programs.dsh = {
     enable = lib.mkEnableOption "DeepSeek Harness (dsh)";
 
@@ -46,13 +55,18 @@ in
       '';
     };
 
-    pluginManager = lib.mkOption {
+    pluginPnpm = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      default = true;
       description = ''
-        Put `pnpm` on the harness's runtime `PATH` so `dsh plugin ...` can
-        install and update profile plugins. Ordinary CLI and Web use does not
-        need it.
+        Keep the package's pinned pnpm on the harness's runtime PATH, so
+        `dsh plugin ...` can install and update profile plugins. The version is
+        the one the package pins, never the caller's `pkgs.pnpm` — this option
+        decides only whether to provision it.
+
+        Set it to false to drop the bundled pnpm entirely: the harness then
+        resolves `pnpm` from the PATH it was started with, so `dsh plugin` works
+        exactly when that PATH already carries one.
       '';
     };
 
@@ -65,12 +79,7 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages = [
-      (
-        if cfg.pluginManager then
-          cfg.package.override { extraRuntimePath = [ pkgs.pnpm ]; }
-        else
-          cfg.package
-      )
+      (cfg.package.override { pluginPnpm = cfg.pluginPnpm; })
     ] ++ cfg.extraPackages;
 
     home.sessionVariables = lib.mkIf (cfg.home != null) {
