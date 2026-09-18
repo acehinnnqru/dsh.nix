@@ -11,11 +11,11 @@ nix build .#dsh
 
 ## Current status
 
-- Verified version: `0.1.5-rc.1` (`dsh-src` pinned at `183f08e9`).
+- Verified version: `0.1.6-alpha.2` (`dsh-src` pinned at `ddefc45f`).
 - Verified platform: `aarch64-darwin`. Other architectures keep the flake attributes, but there is
   no build or runtime verification for them, so they are not claimed as supported.
-- `dsh-nightly` (`0.1.6-alpha.1`) has metadata and evaluates, but no runtime acceptance was done
-  for it this round.
+- `dsh-nightly` (`0.1.6-alpha.1`) has metadata, builds, and its Web profile boots, but no full
+  runtime acceptance was done for it this round.
 - No binary cache.
 
 ## How it builds
@@ -28,7 +28,8 @@ nix build .#dsh
    from the lockfile. There are no placeholder hashes anywhere.
 3. `prepare-runtime.py` points the tarballs at local files inside the source copy, generates the
    Nix-specific runtime manifest and its lockfile importer, and applies two named, narrow rewrites
-   to the upstream workspace configuration (see below).
+   to the upstream workspace configuration (see below). One named patch to the profile loader is
+   applied on top (also below).
 4. The pinned pnpm and Node generate the dependency store offline, install offline, and run
    upstream's `pnpm run build`.
 5. `pnpm deploy --prod --node-linker=hoisted` assembles a self-contained runtime;
@@ -58,6 +59,31 @@ entry (each with a regression test):
 It also: deletes `packageManager` (Nix pins pnpm instead), adds `injectWorkspacePackages` (required
 by `pnpm deploy`, and pnpm reads it only from that file), and removes the source-side postinstall of
 `subprocess-local` (its work now runs against the runtime copy after deployment).
+
+### Why the profile loader is patched
+
+Upstream reaches Node's internal modules (`internal/modules/esm/loader` and friends) through
+`node-addon-require-builtin`, a prebuilt native addon that probes V8 at runtime. A probe written
+against the Node builds upstream ships does not recognise a Node compiled from source, which is
+what nixpkgs provides: it fails with `Unsupported/no-getter` on both `nodejs_22` and `nodejs_24`
+(the official nodejs.org build of the same version succeeds; stripping is not the cause). Since
+`0.1.6-alpha.2` resolves plugin profiles at runtime and made that addon mandatory in "host
+preparation", the failure is fatal: `dsh web` and `dsh <profile>` cannot start at all. Independent
+reports: deepseek-harness
+[discussion #752](https://github.com/deepseek-ai/deepseek-harness/discussions/752) (NixOS, Electron)
+and [#6982](https://github.com/deepseek-ai/deepseek-harness/discussions/6982) (Android/Termux).
+
+`nix/patches/expose-internals-loader.patch` therefore makes `internalModules()` prefer
+`require(moduleId)` when the process was started with `--expose-internals` — the flag the wrapper
+already passes — and keep the addon as the fallback, so an official Node build behaves exactly as
+upstream intends. It rewrites one function in
+`packages/boot/app-boot/src/profile-resolution/resolver.ts`; the same code is inlined into the
+profile-resolution worker bundle, so the patch covers both. Its shape follows the workaround
+validated in #752 and the equivalent patch in
+[Moraxyc's deepseek-harness.nix](https://github.com/Moraxyc/deepseek-harness.nix) (MIT). If upstream
+moves this code the patch stops applying and the build fails, rather than shipping a CLI that cannot
+boot a profile. One consequence: building with `exposeInternals = false` drops the flag and with it
+this fallback, so that configuration needs an official Node build.
 
 ## Updating the source and dependency metadata
 

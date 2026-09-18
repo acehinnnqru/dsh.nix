@@ -15,6 +15,7 @@ to git.**
 | `nix/metadata/<lockKey>/` | generated artefact, committed | upstream changes `pnpm-lock.yaml` or `pnpm-workspace.yaml` |
 | pnpm version | `resolvedPnpm` in `nix/dsh.nix` (version + hash) | only when a pnpm feature is needed |
 | `@file:` config rewriting | `nix/prepare-runtime.py` | upstream changes how those two settings are written |
+| the profile-loader patch | `nix/patches/expose-internals-loader.patch` | upstream moves `internalModules()` in `packages/boot/app-boot/src/profile-resolution/resolver.ts` |
 
 **A new tag does not necessarily change the lock.** Measured on `dsh-v0.1.5-rc.1 → rc.2`, the
 `pnpm-lock.yaml` and `pnpm-workspace.yaml` are byte-identical, so the `lockKey` does not move and
@@ -29,7 +30,9 @@ nix flake update dsh-src            # touches only this input
 # You can also switch without editing the file:
 #   nix flake lock --override-input dsh-src github:deepseek-ai/deepseek-harness/dsh-v0.1.5-rc.2
 
-# 2) Sync the dependency metadata (idempotent: does nothing when already current)
+# 2) Sync the dependency metadata (idempotent: does nothing when already current).
+#    A brand-new lock key has no metadata yet, which is also what makes
+#    `.#dsh.source` unevaluable; the script then reads the flake input directly.
 nix/update-metadata-for-input.sh            # checks both outputs by default
 nix/update-metadata-for-input.sh dsh        # or check just one
 
@@ -37,14 +40,16 @@ nix/update-metadata-for-input.sh dsh        # or check just one
 nix build .#dsh .#dsh-nightly
 
 # 4) Acceptance (needs a temporary HOME, no API key)
-python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
+DSH_SMOKE_EXPECT_PNPM=1 \
+  python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
 ```
 
 Expected output from step 4:
 
 ```
+pnpm: passed
 PTY: passed
-{"version": "0.1.5-rc.1", "cli": "passed", "web": "passed", "assets": 4}
+{"version": "0.1.6-alpha.2", "cli": "passed", "web": "passed", "assets": 4}
 ```
 
 The `version` field must equal the new tag's version.
@@ -84,6 +89,7 @@ Verified: nix build .#dsh .#dsh-nightly, smoke test cli/pty/web passed.
 | `uv__io_poll, kqueue.c` + `Abort trap: 6` at the end of a dependency install | pnpm crashed running on Node 24 | confirm `pnpmNode` is still `nodejs_22`; this reproduces in the sandbox regardless of what is being installed |
 | `cannot resolve required dependency X` from the runtime check | the deploy closure genuinely lacks a package | fix the manifest generation in `prepare-runtime.py`; do **not** add a "copy whatever is missing" fallback |
 | `missing dependency metadata` (a git dependency appears in upstream's new lock) | a dependency has no integrity | `update-metadata.py` errors out; write an explicit, reviewable fetcher for it — never a placeholder hash |
+| `host preparation failed: node-addon-require-builtin unsupported: Unsupported/no-getter` (or `no-realm`) | the prebuilt addon probes V8 at runtime and does not recognise a Node built from source (nixpkgs); `0.1.6-alpha.2` made profile boot depend on it, so `dsh web` / `dsh <profile>` cannot start | `nix/patches/expose-internals-loader.patch` provides the `--expose-internals` carrier and the wrapper must keep that flag; if the patch no longer applies, upstream moved `internalModules()` — re-derive the patch, do not drop the flag |
 
 ## 4. Upgrading nixpkgs on its own
 
