@@ -36,7 +36,25 @@ for target in "${targets[@]}"; do
   echo "=== $target ==="
   # `passthru.source` is the flake input (a source-info set), so `nix eval`
   # prints the store path while `nix build` would refuse it as a non-derivation.
-  source=$(nix eval --raw ".#$target.source" 2>/dev/null)
+  # It is not always reachable: `nix/dsh.nix` asserts that metadata exists for
+  # the pinned lock, so a source whose lock key is new fails to evaluate exactly
+  # when this script is needed. Fall back to the input itself, which is where
+  # `passthru.source` comes from.
+  source=$(nix eval --raw ".#$target.source" 2>/dev/null) || true
+  if [ -z "$source" ] || [ ! -d "$source" ]; then
+    case "$target" in
+      dsh) input=dsh-src ;;
+      dsh-nightly) input=dsh-nightly-src ;;
+      *)
+        echo "ERROR: could not resolve .#$target.source" >&2
+        exit 1
+        ;;
+    esac
+    echo "note: .#$target.source is not evaluable (metadata for the pinned lock is missing);" \
+         "reading input $input directly" >&2
+    source=$(nix eval --impure --raw --expr \
+      "let f = builtins.getFlake (toString ./.); in f.inputs.$input.outPath" 2>/dev/null) || true
+  fi
   if [ -z "$source" ] || [ ! -d "$source" ]; then
     echo "ERROR: could not resolve .#$target.source" >&2
     exit 1

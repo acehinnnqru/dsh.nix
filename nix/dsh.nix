@@ -48,6 +48,13 @@ stdenv.mkDerivation {
   pname = "dsh";
   inherit version;
   src = imported.preparedSource;
+  # Upstream reaches Node internals through a prebuilt native addon that only
+  # recognises the Node builds they ship. This packaging runs on nixpkgs' own
+  # Node, where that probe fails (`Unsupported/no-getter`) and profile boot dies
+  # with it, so the loader has to fall back to the `--expose-internals` the
+  # wrapper already passes. One named, reviewed rewrite; if upstream moves this
+  # code the build fails loudly instead of booting a broken CLI.
+  patches = [ ./patches/expose-internals-loader.patch ];
   pnpmDeps = imported.deps;
   pnpmInstallFlags = imported.flags;
   nativeBuildInputs = [ nodejs resolvedPnpm makeWrapper writableTmpDirAsHomeHook pnpmConfigHook ]
