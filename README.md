@@ -11,11 +11,11 @@ nix build .#dsh
 
 ## Current status
 
-- Verified version: `0.1.6-alpha.2` (`dsh-src` pinned at `ddefc45f`).
+- Verified version: `0.2.0-rc.1` (`dsh-src` pinned at `4878cdab`).
 - Verified platform: `aarch64-darwin`. Other architectures keep the flake attributes, but there is
   no build or runtime verification for them, so they are not claimed as supported.
-- `dsh-nightly` (`0.1.6-alpha.1`) has metadata, builds, and its Web profile boots, but no full
-  runtime acceptance was done for it this round.
+- `dsh-nightly` (`0.2.0-rc.2`, master at `639ed015`) passes the same acceptance run as the
+  release pin this round.
 - No binary cache.
 
 ## How it builds

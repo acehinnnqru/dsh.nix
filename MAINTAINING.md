@@ -36,7 +36,9 @@ nix flake update dsh-src            # touches only this input
 nix/update-metadata-for-input.sh            # checks both outputs by default
 nix/update-metadata-for-input.sh dsh        # or check just one
 
-# 3) Build both outputs
+# 3) Stage the metadata — a new lock key lands as untracked files, and
+#    `nix build` copies only tracked files into the store — then build.
+git add nix/metadata
 nix build .#dsh .#dsh-nightly
 
 # 4) Acceptance (needs a temporary HOME, no API key)
@@ -49,7 +51,7 @@ Expected output from step 4:
 ```
 pnpm: passed
 PTY: passed
-{"version": "0.1.6-alpha.2", "cli": "passed", "web": "passed", "assets": 4}
+{"version": "0.2.0-rc.1", "cli": "passed", "web": "passed", "assets": 4}
 ```
 
 The `version` field must equal the new tag's version.
@@ -62,9 +64,10 @@ One upgrade commit should contain all of:
 - the added/changed `nix/metadata/**`
 
 Forgetting to commit the metadata is the easiest and most insidious mistake: `nix build` copies
-only **tracked** files into the store, so locally (dirty tree, impure evaluation) everything looks
-fine, while another machine or CI fails during evaluation with
-`dsh: missing dependency metadata for <lockKey>`.
+only **tracked** files into the store, so an untracked `nix/metadata/<lockKey>/` is invisible to
+the build and evaluation fails with `dsh: missing dependency metadata for <lockKey>` — on the
+machine doing the upgrade too, not only on another machine or CI. Stage it (`git add`) while the
+upgrade is in progress, and commit it with the pin.
 
 Suggested commit message format:
 
