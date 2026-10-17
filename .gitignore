@@ -6,3 +6,4 @@
 # `nix build` result symlinks.
 /result
 /result-*
+.build/
