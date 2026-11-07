@@ -51,7 +51,7 @@ Expected output from step 4:
 ```
 pnpm: passed
 PTY: passed
-{"version": "0.2.1-rc.2", "cli": "passed", "web": "passed", "assets": 4}
+{"version": "0.2.2-rc.1", "cli": "passed", "web": "passed", "assets": 4}
 ```
 
 The `version` field must equal the new tag's version.

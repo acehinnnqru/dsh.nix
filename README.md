@@ -11,11 +11,11 @@ nix build .#dsh
 
 ## Current status
 
-- Verified version: `0.2.1-rc.2` (`dsh-src` pinned at `687f282e`).
+- Verified version: `0.2.2-rc.1` (`dsh-src` pinned at `66491b05`).
 - Verified platform: `aarch64-darwin`. Other architectures keep the flake attributes, but there is
   no build or runtime verification for them, so they are not claimed as supported.
-- `dsh-nightly` is the same revision as the release pin this round (`master` is at the
-  `dsh-v0.2.1-rc.2` tag, `687f282e`), so it builds the identical package.
+- `dsh-nightly` tracks `master` at `fcc0ad46`, which is ahead of the `dsh-v0.2.2-rc.1` tag
+  (`66491b05`) but still reports version `0.2.2-rc.1`, so it builds a separate package.
 - No binary cache.
 
 ## How it builds

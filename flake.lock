@@ -3,11 +3,11 @@
     "dsh-nightly-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792221763,
-        "narHash": "sha256-WcPs3q4NFTRnH2y1Rc/o7/rvJAOe8s7isoTQYf8APFU=",
+        "lastModified": 1793781600,
+        "narHash": "sha256-cY9Zi12ePt95XIFXOESJOYMlVBpvyNjul4bEkuCSdFk=",
         "owner": "deepseek-ai",
         "repo": "deepseek-harness",
-        "rev": "687f282e8625c6b8d11ff58211a90524be2e4317",
+        "rev": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
         "type": "github"
       },
       "original": {
@@ -20,16 +20,16 @@
     "dsh-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792221763,
-        "narHash": "sha256-WcPs3q4NFTRnH2y1Rc/o7/rvJAOe8s7isoTQYf8APFU=",
+        "lastModified": 1793778885,
+        "narHash": "sha256-pzSBQbLwcT/wnCg4ugWq7YmRngCaFOiKVCjekI5aKa0=",
         "owner": "deepseek-ai",
         "repo": "deepseek-harness",
-        "rev": "687f282e8625c6b8d11ff58211a90524be2e4317",
+        "rev": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
         "type": "github"
       },
       "original": {
         "owner": "deepseek-ai",
-        "ref": "dsh-v0.2.1-rc.2",
+        "ref": "dsh-v0.2.2-rc.1",
         "repo": "deepseek-harness",
         "type": "github"
       }
