@@ -8,7 +8,7 @@ Manager module. This is packaging only, not a fork of upstream.
 
 | Field | Value |
 |---|---|
-| Packaged release | `0.2.2-rc.3` (`dsh-src` at `38a6a5c9`) |
+| Packaged release | `0.2.2-rc.4` (`dsh-src` at `3f321d32`) |
 | Nightly | `master` at `e8f7b93a` (version `0.2.2-rc.2`) |
 | Verified platform | `aarch64-darwin` |
 | Binary cache | none — the harness builds from source on every install |
