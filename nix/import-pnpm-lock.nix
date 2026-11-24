@@ -59,7 +59,9 @@ let
     pname = "dsh";
     src = preparedSource;
     inherit pnpm env;
-    fetcherVersion = 3;
+    # Store format the pinned nixpkgs fetcher requires for pnpm 11;
+    # fetcherVersion 3 was removed in nixpkgs 26.11.
+    fetcherVersion = 5;
     hash = "";
     pnpmInstallFlags = flags;
   };

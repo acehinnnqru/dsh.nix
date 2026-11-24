@@ -2,9 +2,9 @@
   description = "Nix packaging for DeepSeek Harness (dsh) — declarative install of github.com/deepseek-ai/deepseek-harness";
 
   inputs = {
-    # Pinned to the revision this packaging was verified against. Update with
-    # `nix flake update nixpkgs` (then re-check the build).
-    nixpkgs.url = "github:NixOS/nixpkgs/3d8f0f3f72a6cd4d93d0ad13203f2ea1cb7e1456";
+    # Pinned to the revision this packaging was verified against. Move the
+    # revision, then `nix flake update nixpkgs` and re-check the build.
+    nixpkgs.url = "github:NixOS/nixpkgs/9a0772b9b90a2d9cb0d60a78d83845080e1df90b";
 
     # Stable/release source: a `dsh-v*` tag of the harness repository.
     # Switch versions by changing this ref and running `nix flake update dsh-src`,

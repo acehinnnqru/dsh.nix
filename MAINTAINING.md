@@ -85,6 +85,7 @@ Verified: nix build .#dsh .#dsh-nightly, smoke test cli/pty/web passed.
 | `missing dependency metadata for <lockKey>` | upstream changed the lock and the metadata was not generated or not committed | run the script from step 1, then **commit** |
 | `source and dependency metadata differ` | the metadata belongs to another revision | same as above; do not hand-edit `source.json` |
 | `has format N, expected M` | the metadata format version is stale | regenerate with the current `update-metadata.py` |
+| `fetchPnpmDeps fetcherVersion = 3 is no longer supported` | the pinned nixpkgs moved the pnpm store format | set `fetcherVersion` in `nix/import-pnpm-lock.nix` to the supported value (currently 5) and rebuild |
 | `ERR_PNPM_INVALID_VERSION_UNION` / `ERR_PNPM_NAME_PATTERN_IN_VERSION_UNION` | upstream added a `@file:` workspace entry to `allowBuilds` or `minimumReleaseAgeExclude` | cover it in the named rewrites in `prepare-runtime.py` and add an assertion to `test-prepare-runtime.py`; do not loosen these into a wildcard rewrite |
 | `ERR_PNPM_OUTDATED_LOCKFILE` (mentions `apps/nix-runtime`) | the generated runtime manifest disagrees with the lock importer | check the specifier derivation in `prepare-runtime.py` (a root `overrides` `link:` must be re-based against the runtime directory) |
 | `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` (mentions `injectWorkspacePackages`) | the workspace config disagrees with the lockfile `settings` | `prepare-runtime.py` writes both at once; check whether that was broken |
@@ -99,6 +100,8 @@ Verified: nix build .#dsh .#dsh-nightly, smoke test cli/pty/web passed.
 Only when a newer toolchain is needed, and as a **separate commit** so it can be reverted cleanly:
 
 ```sh
+# Move the revision in flake.nix first: the input pins an exact revision, so
+# `nix flake update nixpkgs` alone only re-locks the revision already named.
 nix flake update nixpkgs
 nix build .#dsh .#dsh-nightly
 python3 nix/smoke-test.py ./result --node "$(nix eval --raw .#dsh.node)/bin/node"
