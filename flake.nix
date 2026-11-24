@@ -9,9 +9,9 @@
     # Stable/release source: a `dsh-v*` tag of the harness repository.
     # Switch versions by changing this ref and running `nix flake update dsh-src`,
     # or without editing anything:
-    #   nix flake lock --override-input dsh-src github:deepseek-ai/deepseek-harness/dsh-v0.2.2-rc.4
+    #   nix flake lock --override-input dsh-src github:deepseek-ai/deepseek-harness/dsh-v0.2.3-alpha.2
     dsh-src = {
-      url = "github:deepseek-ai/deepseek-harness/dsh-v0.2.2-rc.4";
+      url = "github:deepseek-ai/deepseek-harness/dsh-v0.2.3-alpha.2";
       flake = false;
     };
 
